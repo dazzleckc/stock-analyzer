@@ -33,6 +33,7 @@
 ```
 stock-analyzer/
 ├── README.md
+├── CONTRIBUTING.md
 ├── data/                          # Parquet 数据文件（.gitignore）
 │   ├── stocks.parquet             # 全市场股票列表（代码/名称/申万行业）
 │   ├── kline_daily.parquet        # 日线数据（全量个股 × 半年）
@@ -59,37 +60,85 @@ stock-analyzer/
 | 报告模板 | Jinja2 + ECharts | GitHub Dark 主题，自包含 HTML |
 | 运行环境 | Python ≥ 3.10 | |
 
-## 快速开始
+## 安装
 
-### 环境准备
+### 前置条件
+
+- **Python** ≥ 3.10（推荐 3.12+）
+- **pip** ≥ 23.0
+
+> 当前项目依赖 Polars，该库针对 Apple Silicon 和 Intel 芯片均提供预编译 wheel。Linux 用户需确保 glibc ≥ 2.28。
+
+### 步骤
 
 ```bash
-# 创建虚拟环境
+# 1. 克隆仓库
+git clone <repo-url>
+cd stock-analyzer
+
+# 2. 创建并激活虚拟环境
 python3 -m venv venv
-source venv/bin/activate
+source venv/bin/activate       # macOS / Linux
+# 或
+venv\Scripts\activate          # Windows (cmd)
+# 或
+venv\Scripts\Activate.ps1      # Windows (PowerShell)
 
-# 安装依赖
+# 3. 安装依赖
 pip install -r requirements.txt
+
+# 4. 验证安装
+python -c "import polars; print(polars.__version__)"
 ```
 
-### 获取数据
+### requirements.txt
 
-数据通过通达信接口拉取，需要 WorkBuddy 环境支持（已集成通达信 MCP 连接器）：
+```
+polars>=1.0.0
+jinja2>=3.0.0
+```
+
+> 依赖精简到最少。Polars 处理数据，Jinja2 渲染报告模板。无需数据库驱动、无需 Web 框架。
+
+### 可选依赖
 
 ```bash
-# WorkBuddy 会自动调用 fetch_data.py 拉取全量数据
-# 输出到 data/ 目录
+# 如需使用 Notebook 交互式探索
+pip install jupyter matplotlib
+
+# 如需在脚本中直接调用通达信接口
+# 需要 WorkBuddy 环境并已连接通达信 MCP
 ```
 
-也可以手动准备以下 Parquet 文件（详见 `scripts/fetch_data.py`）：
+## 使用指南
 
-- `data/stocks.parquet` — 列：code, name, industry（申万行业分类）
-- `data/kline_daily.parquet` — 列：code, trade_date, open, high, low, close, volume, amount
-- `data/indices.parquet` — 列：code, trade_date, open, high, low, close, volume
+### 数据准备
+
+数据通过通达信接口拉取。两种方式：
+
+**方式一：WorkBuddy 自动拉取（推荐）**
+
+在 WorkBuddy 环境下，确保已连接通达信 MCP 连接器，运行：
+
+```bash
+python scripts/fetch_data.py
+```
+
+脚本会调用 `tdx_kline` / `tdx_quotes` 等接口，自动拉取全市场日线数据并写入 `data/` 目录。
+
+**方式二：手动准备 Parquet 文件**
+
+按照以下 schema 自行准备数据：
+
+| 文件 | 列 | 类型 |
+|------|-----|------|
+| `data/stocks.parquet` | code, name, industry | str, str, str |
+| `data/kline_daily.parquet` | code, trade_date, open, high, low, close, volume, amount | str, date, f64, f64, f64, f64, i64, f64 |
+| `data/indices.parquet` | code, trade_date, open, high, low, close, volume | str, date, f64, f64, f64, f64, i64 |
 
 ### 使用示例
 
-**示例 1：全市场涨跌分布**
+#### 示例 1：全市场涨跌分布
 
 ```python
 import polars as pl
@@ -97,19 +146,26 @@ import polars as pl
 df = pl.read_parquet("data/kline_daily.parquet")
 today = df.filter(pl.col("trade_date") == df["trade_date"].max())
 
-result = today.with_columns(
-    pl.col("close").pct_change().over("code").alias("pct_chg")
-).group_by(
-    pl.col("pct_chg").cut(
-        [-0.07, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.07],
-        labels=["跌停", ">5%", "3-5%", "1-3%", "±1%", "1-3%", "3-5%", ">5%", "涨停"]
-    ).alias("区间")
-).agg(pl.count().alias("个股数"))
+result = (
+    today
+    .with_columns(
+        pl.col("close").pct_change().over("code").alias("pct_chg")
+    )
+    .group_by(
+        pl.col("pct_chg").cut(
+            [-0.07, -0.05, -0.03, -0.01, 0.01, 0.03, 0.05, 0.07],
+            labels=["跌停", ">5%", "3-5%", "1-3%", "±1%", "1-3%", "3-5%", ">5%", "涨停"]
+        ).alias("区间")
+    )
+    .agg(pl.count().alias("个股数"))
+)
 ```
 
-**示例 2：筛选创 20 日新高且属于科技行业的个股**
+#### 示例 2：筛选创 20 日新高且属于科技行业的个股
 
 ```python
+import polars as pl
+
 stocks = pl.read_parquet("data/stocks.parquet")
 kline = pl.read_parquet("data/kline_daily.parquet")
 
@@ -121,19 +177,22 @@ result = (
         pl.col("high").rolling_max(window_size=20).over("code").alias("high_20d")
     )
     .filter(pl.col("high") == pl.col("high_20d"))
-    .filter(pl.col("trade_date") == "2026-07-01")
+    .filter(pl.col("trade_date") == pl.col("trade_date").max())
+    .select(["code", "name", "industry", "close", "high_20d"])
+    .sort("close", descending=True)
 )
 ```
 
-**示例 3：一键生成市场温度计报告**
+#### 示例 3：一键生成市场温度计报告
 
 ```bash
 python main.py --report thermometer --output reports/today.html
 ```
 
 输出一个自包含的 ECharts HTML 文件，包含：
+
 - 全市场温度（Z-score 标准化）
-- TOP20 成交额占比趋势
+- TOP 20 成交额占比趋势
 - 涨跌分布（涨/跌 >5%、±7%）
 - 净新高数（20 日 / 60 日）
 - 温度分布直方图 + 极端温度日记录
@@ -144,8 +203,8 @@ python main.py --report thermometer --output reports/today.html
 
 | 因子 | 含义 | 权重 |
 |------|------|------|
-| F1 | 涨跌比（上涨家数/(上涨+下跌)） | 17% |
-| F2 | TOP20 成交额占比 | 21% |
+| F1 | 涨跌比（上涨家数 / (上涨 + 下跌)） | 17% |
+| F2 | TOP 20 成交额占比 | 21% |
 | F3 | 涨幅 >5% 个股占比 | 14% |
 | F5 | 涨跌停比 | 8% |
 | F6 | 连板效应 | 14% |
@@ -162,6 +221,21 @@ python main.py --report thermometer --output reports/today.html
 | 50-65 | 偏温 | 温和上行 |
 | 65-80 | 过热 | 注意风险 |
 | > 80 | 沸点 | 极端亢奋，历史高位区 |
+
+## 贡献指南
+
+欢迎贡献！本项目的协作建立在 AI 辅助编码之上——**代码产出不是瓶颈，审查能力才是。** 提交前请务必通读 [CONTRIBUTING.md](./CONTRIBUTING.md)，以下为速览。
+
+**核心纪律：**
+
+- **AI 是工具，不是替身**：每段代码你必须理解并能解释。
+- **绝不盲信**：AI 会幻觉 API、写出错误逻辑，未经本地验证不得提交。
+- **最小 diff**：只改需求相关的代码，不顺手重构。
+- **提交脚本，不提交数据**：`data/` 和 `reports/` 已在 `.gitignore` 排除。
+
+**流程：** `dev` 切分支 → 开发 + 自检 → PR → `dev`，`main` 分支 Squash Merge。
+
+**版本：** 遵循 SemVer，当前 **0.1.0-dev**。
 
 ## Roadmap
 
