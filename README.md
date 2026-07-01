@@ -39,7 +39,8 @@ stock-analyzer/
 │   ├── kline_daily.parquet        # 日线数据（全量个股 × 半年）
 │   └── indices.parquet            # 主要指数日线
 ├── scripts/
-│   ├── fetch_data.py              # 数据采集（可通过 WorkBuddy 通达信 MCP 拉取）
+│   ├── fetch_kline.py             # 日K全量拉取（AKShare 东方财富）
+│   ├── update_kline.py            # 日K增量更新
 │   ├── indicators.py              # 技术指标计算（MA/RSI/波动率/新高新低等）
 │   ├── screener.py                # 个股筛选器（基于 K 线条件 + 行业 + 基本面）
 │   └── market_thermometer.py      # 市场温度计分析模块
@@ -112,6 +113,8 @@ pip install jupyter matplotlib
 
 ## 使用指南
 
+> 📅 **预置数据**：仓库附带 `data/` 下三份 Parquet 文件，覆盖 **2026-01-05 ~ 2026-07-01**（117 个交易日）。clone 即可用，无需跑全量初始化。日后更新执行 `python scripts/update_kline.py` 和 `python scripts/update_indices.py`。
+
 ### 数据准备
 
 数据通过通达信接口拉取。两种方式：
@@ -121,7 +124,7 @@ pip install jupyter matplotlib
 在 WorkBuddy 环境下，确保已连接通达信 MCP 连接器，运行：
 
 ```bash
-python scripts/fetch_data.py
+python scripts/fetch_kline.py
 ```
 
 脚本会调用 `tdx_kline` / `tdx_quotes` 等接口，自动拉取全市场日线数据并写入 `data/` 目录。
