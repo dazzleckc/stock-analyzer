@@ -33,17 +33,16 @@ def main():
         print(f"数据已是最新（最新日期：{last_date}），无需更新。")
         return
 
-    print(f"增量更新：{start} ~ {end}（最新数据：{last_date}）")
+    print(f"增量更新：{start} ~ {end}（现有最新：{last_date}）")
 
     new_frames = []
-    for code, name in INDEX_LIST.items():
-        df = fetch_index(code, name)
+    for ts_code, name in INDEX_LIST.items():
+        df = fetch_index(ts_code, name)
         if df is not None and len(df) > 0:
             new_frames.append(df)
-            new_rows = len(df)
-            print(f"  {name}({code}): +{new_rows} 行")
+            print(f"  {name}({ts_code}): +{len(df)} 行")
         else:
-            print(f"  {name}({code}): 无新数据")
+            print(f"  {name}({ts_code}): 无新数据")
 
     if not new_frames:
         print("没有新数据需要写入。")
@@ -56,10 +55,36 @@ def main():
         .sort(["trade_date", "code"])
     )
 
+    # 重新计算全市场汇总
+    mk_codes = ["000001", "399106", "899050"]
+    old_without_mk = updated.filter(~pl.col("code").is_in(["999999"]))
+    total = (
+        updated
+        .filter(pl.col("code").is_in(mk_codes))
+        .group_by("trade_date")
+        .agg([
+            pl.col("amount").sum().alias("amount"),
+            pl.col("volume").sum().alias("volume"),
+        ])
+        .with_columns([
+            pl.lit("999999").alias("code"),
+            pl.lit("全市场").alias("name"),
+            pl.lit(0.0).alias("open"),
+            pl.lit(0.0).alias("high"),
+            pl.lit(0.0).alias("low"),
+            pl.lit(0.0).alias("close"),
+            pl.lit(0.0).alias("amplitude"),
+            pl.lit(0.0).alias("pct_change"),
+            pl.lit(0.0).alias("turnover_rate"),
+        ])
+        .select(updated.columns)
+    )
+    updated = pl.concat([old_without_mk, total], how="vertical").sort(["trade_date", "code"])
+
     updated.write_parquet(path)
 
     new_dates = new_data["trade_date"].unique().to_list()
-    print(f"\n  → 新增 {len(new_dates)} 个交易日，共 {len(updated)} 行")
+    print(f"  → 新增 {len(new_dates)} 个交易日，共 {len(updated)} 行")
     print(f"  → 日期范围：{updated['trade_date'].min()} ~ {updated['trade_date'].max()}")
     print("完成。")
 

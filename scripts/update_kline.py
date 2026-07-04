@@ -12,24 +12,30 @@ import time
 from datetime import date, timedelta
 
 import polars as pl
-from tqdm import tqdm
+from fetch_kline import (  # noqa: E402 - 延迟 import 确保 tushare 初始化在先
+    fetch_single_stock,
+    DATA_DIR,
+    STOCKS_PATH,
+    ensure_dirs,
+)
 
-from fetch_kline import fetch_single_stock, DATA_DIR
-
-ADJUST = "qfq"
+# Tushare 代理清理（fetch_kline 已做，这里冗余保证）
+for _key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+    os.environ.pop(_key, None)
 
 
 def main():
     kline_path = os.path.join(DATA_DIR, "kline_daily.parquet")
-    stocks_path = os.path.join(DATA_DIR, "stocks.parquet")
 
     if not os.path.exists(kline_path):
         print("未找到 kline_daily.parquet，请先运行 fetch_kline.py 做全量初始化。")
         return
 
-    # 1. 加载已有数据和股票列表
+    ensure_dirs()
+
+    # 加载已有数据和股票列表
     existing = pl.read_parquet(kline_path)
-    stocks = pl.read_parquet(stocks_path)
+    stocks = pl.read_parquet(STOCKS_PATH)
     last_date = existing["trade_date"].max()
     today = date.today()
     tomorrow = today + timedelta(days=1)
@@ -41,22 +47,21 @@ def main():
         print(f"数据已是最新（最新日期：{last_date}），无需更新。")
         return
 
-    print(f"增量更新：{start} ~ {end}（最新数据：{last_date}）")
+    print(f"增量更新：{start} ~ {end}（现有最新：{last_date}）")
 
-    # 2. 逐只拉取增量数据
-    codes = stocks["code"].to_list()
+    # 逐只拉取增量
+    codes = sorted(stocks["code"].to_list())
     new_frames = []
-    success = 0
-    failed = 0
+    success = failed = 0
 
-    for code in tqdm(codes, desc="更新进度"):
+    for code in codes:
         df = fetch_single_stock(code, start_date=start, end_date=end)
         if df is not None and len(df) > 0:
             new_frames.append(df)
             success += 1
         else:
             failed += 1
-        time.sleep(0.3 + random.uniform(-0.2, 0.2))
+        time.sleep(0.3 + random.uniform(0.0, 0.2))
 
     print(f"  → 有新增数据 {success} 只，无数据 {failed} 只")
 
@@ -64,7 +69,7 @@ def main():
         print("没有新数据需要写入。")
         return
 
-    # 3. 合并新旧数据，按主键去重
+    # 合并新旧，按主键去重
     new_data = pl.concat(new_frames, how="vertical")
     updated = (
         pl.concat([existing, new_data], how="vertical")

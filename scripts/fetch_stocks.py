@@ -3,9 +3,9 @@
 数据来源：Tushare Pro
 接口：stock_basic（每次最多返回 6000 行，调取一次即可拉全）
 
-筛选逻辑（与 kline_daily.parquet 的 2026-01-01 起始日期对齐）：
+筛选逻辑（与 kline_daily.parquet 的 2026-01-05 第一个交易日对齐）：
   - list_status='L'  正常上市          → 全部保留
-  - list_status='D'  已退市            → 仅保留 delist_date > '20260101'
+  - list_status='D'  已退市            → 仅保留 delist_date > '20260105'
   - list_status='P'  暂停上市          → 全部保留（可能复牌）
   - list_status='G'  过会未交易        → 排除（尚无日K）
 
@@ -24,7 +24,7 @@ DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 STOCKS_PATH = os.path.join(DATA_DIR, "stocks.parquet")
 
 TUSHARE_TOKEN = "b9c84e9a50444ef4c497adf0681acfa59646a6ba89b03fd393fbd53a"
-CUTOFF_DATE = "20260101"          # 与 kline_daily 起始日期对齐
+CUTOFF_DATE = "20260105"          # 2026 年第一个交易日，与 kline_daily 对齐
 FIELDS = "ts_code,symbol,name,list_status,list_date,delist_date"
 
 # 取消代理（Tushare 不走本地代理）
@@ -51,7 +51,7 @@ def filter_stocks(df: pl.DataFrame) -> pl.DataFrame:
 
     result = (
         df
-        .with_columns(pl.col("delist_date").cast(pl.Utf8))
+        .with_columns(pl.col("delist_date").cast(pl.Utf8).str.replace(r"\.0$", ""))
         .filter(
             # 正常上市 / 暂停上市 → 全保留
             pl.col("list_status").is_in(["L", "P"])
@@ -72,7 +72,7 @@ def filter_stocks(df: pl.DataFrame) -> pl.DataFrame:
     )
 
     excluded = total - len(result)
-    print(f"  筛选结果：保留 {len(result)} 只，排除 {excluded} 只（2026-01-01 前退市）")
+    print(f"  筛选结果：保留 {len(result)} 只，排除 {excluded} 只（{CUTOFF_DATE[:4]}-{CUTOFF_DATE[4:6]}-{CUTOFF_DATE[6:]} 前退市）")
     return result
 
 
