@@ -15,6 +15,9 @@ data/raw/
 # Generated reports
 reports/
 
+# WorkBuddy project data
+.workbuddy/
+
 # IDE
 .idea/
 .vscode/
