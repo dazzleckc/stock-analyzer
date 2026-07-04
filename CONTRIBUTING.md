@@ -70,7 +70,7 @@ script, indicator, screener, report, template, data, docs
 1. **AI 是工具，不是替身。** 每段 AI 生成的代码，贡献者必须理解其行为并能向 Reviewer 解释。如果你自己都没弄明白一段代码为什么能跑——不要提交。
 2. **绝不盲信。** AI 可能幻觉出不存在的方法名、API 参数，或写出一眼正确的错误逻辑。未经验证的代码禁止合入任何分支。
 3. **先定接口，再写代码。** 让 AI 生成代码前，明确输入输出的类型和边界条件。模糊的 prompt 产生模糊的代码——随之而来的是漫长的 Review。
-4. **安全是底线。** 绝不允许 AI 在代码中生成 webhook URL、API Key 等敏感字符串。配置项必须通过环境变量。
+4. **安全是底线。** Token 等敏感信息必须通过 `config/local.py`（已 `.gitignore`）引入，禁止硬编码在任何脚本中。参照 `config/local.example.py` 模板。
 
 ### 提交规则（AI 侧）
 

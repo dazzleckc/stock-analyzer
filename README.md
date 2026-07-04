@@ -5,13 +5,13 @@
 ## 设计哲学
 
 ```
-数据拉取（通达信 → Parquet） → 量化分析（Polars） → 可视化报告（ECharts HTML）
+数据拉取（Tushare Pro → Parquet） → 量化分析（Polars） → 可视化报告（ECharts HTML）
       一次性的                      反复玩的                    最终产物
 ```
 
 三条原则：
 
-1. **数据存成 Parquet 文件**，不建数据库。5000 只 A 股 × 半年日线 ≈ 60 万行，压缩后 ~30MB，Polars 毫秒级读入。
+1. **数据存成 Parquet 文件**，不建数据库。5,542 只 A 股 × 119 个交易日 ≈ 65 万行，压缩后 ~20MB，Polars 毫秒级读入。
 2. **分析用 Polars 链式调用**。窗口函数、滚动计算、分组聚合、多表 JOIN 都是一行链式调用，表达能力等价于 SQL 但更符合分析思维。
 3. **报告用 ECharts 输出 HTML**。自包含的单文件，用浏览器打开即可查看，方便分享。
 
@@ -34,41 +34,69 @@
 stock-analyzer/
 ├── README.md
 ├── CONTRIBUTING.md
-├── data/                          # Parquet 数据文件（.gitignore）
-│   ├── stocks.parquet             # 全市场股票列表（代码/名称/申万行业）
-│   ├── kline_daily.parquet        # 日线数据（全量个股 × 半年）
-│   └── indices.parquet            # 主要指数日线
-├── scripts/
-│   ├── fetch_kline.py             # 日K全量拉取（AKShare 东方财富）
-│   ├── update_kline.py            # 日K增量更新
-│   ├── indicators.py              # 技术指标计算（MA/RSI/波动率/新高新低等）
-│   ├── screener.py                # 个股筛选器（基于 K 线条件 + 行业 + 基本面）
-│   └── market_thermometer.py      # 市场温度计分析模块
-├── templates/
-│   └── thermometer.html.j2        # ECharts 报告模板（Jinja2）
-├── reports/                       # 生成的 HTML 报告（.gitignore）
+├── config/
+│   ├── __init__.py                 # 公共配置模块
+│   ├── local.example.py            # 本地配置模板（可提交）
+│   └── local.py                    # 敏感配置（已 .gitignore）
 ├── requirements.txt
-└── main.py                        # 主入口：一键生成报告
+├── data/                           # Parquet 数据文件
+│   ├── stocks.parquet              # 全市场股票列表（code, name）
+│   ├── kline_daily.parquet         # 日线数据（5,542 只 × 119 日）
+│   ├── indices.parquet             # 主要指数日线（8 指数 + 全市场）
+│   ├── st_stock.parquet            # ST 风险警示板数据（289 只）
+│   └── delist_period.parquet       # 退市整理期记录（15 只）
+├── scripts/
+│   ├── fetch_kline.py              # 日K全量拉取（Tushare pro_bar）
+│   ├── update_kline.py             # 日K增量更新
+│   ├── fetch_indices.py            # 指数全量拉取（Tushare pro_bar）
+│   ├── update_indices.py           # 指数增量更新
+│   ├── fetch_stocks.py             # 股票列表筛选（Tushare stock_basic）
+│   ├── fetch_st_stock.py           # ST 股票数据采集（Tushare stock_st）
+│   ├── fetch_delist_period.py      # 退市整理期数据采集（Tushare st）
+│   ├── indicators.py               # 技术指标计算（MA/RSI/波动率/新高新低等）
+│   ├── screener.py                 # 个股筛选器（基于 K 线条件 + 行业 + 基本面）
+│   └── market_thermometer.py       # 市场温度计分析模块
+├── templates/
+│   └── thermometer.html.j2         # ECharts 报告模板（Jinja2）
+├── reports/                        # 生成的 HTML 报告（.gitignore）
+└── main.py                         # 主入口：一键生成报告
 ```
 
 ## 技术栈
 
 | 层 | 技术 | 用途 |
 |---|------|------|
-| 数据获取 | 通达信 MCP / tdx_kline | A 股日线、指数、行业分类 |
+| 数据获取 | Tushare Pro (pro_bar / stock_basic / stock_st / st) | A 股日线、指数、股票列表、ST 风险警示 |
+| 交叉验证 | 通达信 MCP / tdx_kline | 数据质量交叉比对 |
 | 数据格式 | Apache Parquet | 列式存储，自带压缩和 schema |
 | 数据处理 | Polars | 高性能 DataFrame 库，链式 API |
 | 报告模板 | Jinja2 + ECharts | GitHub Dark 主题，自包含 HTML |
 | 运行环境 | Python ≥ 3.10 | |
 
+## 数据源
+
+### 主数据源：Tushare Pro（需 Token）
+
+| 接口 | 用途 | 对应脚本 |
+|------|------|---------|
+| `pro_bar` (asset='E') | 个股前复权日线（OHLCV + 换手率 + 量比） | `fetch_kline.py` / `update_kline.py` |
+| `pro_bar` (asset='I') | 指数日线（8 只主要指数 + 全市场汇总） | `fetch_indices.py` / `update_indices.py` |
+| `stock_basic` | 全市场股票列表 + 退市日期过滤 | `fetch_stocks.py` |
+| `stock_st` | ST 风险警示板每日标记 | `fetch_st_stock.py` |
+| `st` | 风险警示生命周期事件（含退市整理期） | `fetch_delist_period.py` |
+
+Tushare Token 需要 ≥ 120 积分（日线接口权限），6000 积分可获得 ST 数据。
+
+### 交叉验证：通达信
+
+通达信 MCP 通过 WorkBuddy 连接，用于验证 Tushare 数据的准确性。经全量 119 日比对，OHLC 偏差 ≤ 0.03 元（< 0.3%），成交量/成交额偏差 < 0.001%。
+
 ## 安装
 
 ### 前置条件
 
-- **Python** ≥ 3.10（推荐 3.12+）
-- **pip** ≥ 23.0
-
-> 当前项目依赖 Polars，该库针对 Apple Silicon 和 Intel 芯片均提供预编译 wheel。Linux 用户需确保 glibc ≥ 2.28。
+- **Python** ≥ 3.10
+- **Tushare Pro Token**（注册地址：https://tushare.pro）
 
 ### 步骤
 
@@ -81,63 +109,57 @@ cd stock-analyzer
 python3 -m venv venv
 source venv/bin/activate       # macOS / Linux
 # 或
-venv\Scripts\activate          # Windows (cmd)
-# 或
-venv\Scripts\Activate.ps1      # Windows (PowerShell)
+venv\Scripts\activate          # Windows
 
 # 3. 安装依赖
 pip install -r requirements.txt
 
-# 4. 验证安装
-python -c "import polars; print(polars.__version__)"
+# 4. 配置 Tushare Token
+cp config/local.example.py config/local.py
+# 编辑 config/local.py，填入你的 Tushare Token
+
+# 5. 验证安装
+python -c "import polars, tushare; print('OK')"
 ```
 
 ### requirements.txt
 
 ```
 polars>=1.0.0
-jinja2>=3.0.0
-```
-
-> 依赖精简到最少。Polars 处理数据，Jinja2 渲染报告模板。无需数据库驱动、无需 Web 框架。
-
-### 可选依赖
-
-```bash
-# 如需使用 Notebook 交互式探索
-pip install jupyter matplotlib
-
-# 如需在脚本中直接调用通达信接口
-# 需要 WorkBuddy 环境并已连接通达信 MCP
+tushare>=1.4.0
+pandas>=2.0.0
+tqdm>=4.60.0
 ```
 
 ## 使用指南
 
-> 📅 **预置数据**：仓库附带 `data/` 下三份 Parquet 文件，覆盖 **2026-01-05 ~ 2026-07-01**（117 个交易日）。clone 即可用，无需跑全量初始化。日后更新执行 `python scripts/update_kline.py` 和 `python scripts/update_indices.py`。
+> 📅 **预置数据**：仓库附带 `data/` 下的 Parquet 文件，覆盖 **2026-01-05 ~ 2026-07-03**（119 个交易日）。clone 即可用，无需跑全量初始化。日后更新执行增量脚本。
 
-### 数据准备
-
-数据通过通达信接口拉取。两种方式：
-
-**方式一：WorkBuddy 自动拉取（推荐）**
-
-在 WorkBuddy 环境下，确保已连接通达信 MCP 连接器，运行：
+### 数据初始化（首次使用或重建）
 
 ```bash
+# 1. 获取股票列表（约 10s）
+python scripts/fetch_stocks.py
+
+# 2. 拉取全量日线（约 24min，5,542 只 × 119 日）
 python scripts/fetch_kline.py
+
+# 3. 拉取指数数据（约 1min）
+python scripts/fetch_indices.py
+
+# 4. 拉取 ST 股票数据（约 30s）
+python scripts/fetch_st_stock.py
+
+# 5. 拉取退市整理期数据（约 3min）
+python scripts/fetch_delist_period.py
 ```
 
-脚本会调用 `tdx_kline` / `tdx_quotes` 等接口，自动拉取全市场日线数据并写入 `data/` 目录。
+### 日常更新
 
-**方式二：手动准备 Parquet 文件**
-
-按照以下 schema 自行准备数据：
-
-| 文件 | 列 | 类型 |
-|------|-----|------|
-| `data/stocks.parquet` | code, name, industry | str, str, str |
-| `data/kline_daily.parquet` | code, trade_date, open, high, low, close, volume, amount | str, date, f64, f64, f64, f64, i64, f64 |
-| `data/indices.parquet` | code, trade_date, open, high, low, close, volume | str, date, f64, f64, f64, f64, i64 |
+```bash
+python scripts/update_kline.py     # 增量更新日线
+python scripts/update_indices.py   # 增量更新指数
+```
 
 ### 使用示例
 
@@ -164,41 +186,56 @@ result = (
 )
 ```
 
-#### 示例 2：筛选创 20 日新高且属于科技行业的个股
+#### 示例 2：筛选创 20 日新高的个股
 
 ```python
 import polars as pl
 
-stocks = pl.read_parquet("data/stocks.parquet")
 kline = pl.read_parquet("data/kline_daily.parquet")
 
 result = (
     kline
-    .join(stocks, on="code")
-    .filter(pl.col("industry").str.contains("电子|半导体|科创|计算机"))
     .with_columns(
         pl.col("high").rolling_max(window_size=20).over("code").alias("high_20d")
     )
     .filter(pl.col("high") == pl.col("high_20d"))
     .filter(pl.col("trade_date") == pl.col("trade_date").max())
-    .select(["code", "name", "industry", "close", "high_20d"])
+    .select(["code", "close", "high_20d"])
     .sort("close", descending=True)
 )
 ```
 
-#### 示例 3：一键生成市场温度计报告
+#### 示例 3：过滤 ST 股和退市整理期股票
 
-```bash
-python main.py --report thermometer --output reports/today.html
+```python
+import polars as pl
+
+kline = pl.read_parquet("data/kline_daily.parquet")
+st_stock = pl.read_parquet("data/st_stock.parquet")
+delist = pl.read_parquet("data/delist_period.parquet")
+
+# 过滤 ST 股
+st_codes = st_stock["code"].unique()
+clean = kline.filter(~pl.col("code").is_in(st_codes))
+
+# 过滤退市整理期（从 imp_date 起排除）
+# ...
 ```
 
-输出一个自包含的 ECharts HTML 文件，包含：
+## 数据字段说明
 
-- 全市场温度（Z-score 标准化）
-- TOP 20 成交额占比趋势
-- 涨跌分布（涨/跌 >5%、±7%）
-- 净新高数（20 日 / 60 日）
-- 温度分布直方图 + 极端温度日记录
+### kline_daily.parquet
+
+| 字段 | 类型 | 单位 | 说明 |
+|------|------|------|------|
+| code | str | — | 6 位股票代码 |
+| trade_date | date | — | 交易日 |
+| open / high / low / close | f64 | 元 | OHLC 价格（前复权） |
+| volume | i64 | 手 | 成交量 |
+| amount | f64 | 千元 | 成交额 |
+| amplitude | f64 | % | 振幅 = (high-low)/pre_close×100 |
+| pct_change | f64 | % | 涨跌幅 |
+| turnover_rate | f64 | % | 换手率 |
 
 ## 市场温度计指标说明
 
@@ -234,14 +271,20 @@ python main.py --report thermometer --output reports/today.html
 - **AI 是工具，不是替身**：每段代码你必须理解并能解释。
 - **绝不盲信**：AI 会幻觉 API、写出错误逻辑，未经本地验证不得提交。
 - **最小 diff**：只改需求相关的代码，不顺手重构。
-- **提交脚本，不提交数据**：`data/` 和 `reports/` 已在 `.gitignore` 排除。
+- **提交脚本，不提交数据**：`data/raw/` 和 `reports/` 已在 `.gitignore` 排除；最终产出（parquet）因体量小提交以供开箱即用。
 
 **流程：** `dev` 切分支 → 开发 + 自检 → PR → `dev`，`main` 分支 Squash Merge。
+
+**本地配置：** 首次 clone 后执行 `cp config/local.example.py config/local.py` 并填入 Tushare Token。
 
 **版本：** 遵循 SemVer，当前 **0.1.0-dev**。
 
 ## Roadmap
 
+- [x] 全市场日线数据采集（Tushare pro_bar）
+- [x] 指数 + 全市场汇总
+- [x] ST 风险警示板数据
+- [x] 退市整理期数据
 - [ ] 完整温度计因子计算
 - [ ] 行业分赛道温度（科技 / 消费 / 制造等）
 - [ ] 个股筛选器（K 线条件 + 行业 + 基本面）
