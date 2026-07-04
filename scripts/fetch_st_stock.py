@@ -25,6 +25,7 @@ import pandas as pd
 import polars as pl
 import tushare as ts
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config.local import TUSHARE_TOKEN
 
 # ── 路径 ──────────────────────────────────────────────

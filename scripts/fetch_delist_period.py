@@ -14,6 +14,7 @@
 """
 
 import os
+import sys
 import argparse
 import time
 
@@ -22,6 +23,7 @@ import polars as pl
 import tushare as ts
 from tqdm import tqdm
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config.local import TUSHARE_TOKEN
 
 # ---------------------------------------------------------------------------

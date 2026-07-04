@@ -1,60 +1,49 @@
-"""股票列表更新脚本（Tushare stock_basic）
+"""股票列表更新脚本
 
-数据来源：Tushare Pro
-接口：stock_basic（每次最多返回 6000 行，调取一次即可拉全）
+每次全量拉取 Tushare stock_basic，与本地 stocks.parquet 比对差异，
+格式化输出 新增 / 移除 / 名称变更，最后覆盖写入。
 
-筛选逻辑（与 kline_daily.parquet 的 2026-01-05 第一个交易日对齐）：
-  - list_status='L'  正常上市          → 全部保留
-  - list_status='D'  已退市            → 仅保留 delist_date > '20260105'
-  - list_status='P'  暂停上市          → 全部保留（可能复牌）
-  - list_status='G'  过会未交易        → 排除（尚无日K）
-
-输出：data/stocks.parquet
-  字段：code, name
+数据来源：Tushare Pro stock_basic
+筛选逻辑：L/P 全保留，D 仅保留 delist_date > CUTOFF_DATE
 
 使用方式：
-  python scripts/fetch_stocks.py           # 全量拉取
-  python scripts/fetch_stocks.py --update  # 增量更新（仅变更时写入）
+  python scripts/fetch_stocks.py
 """
 
 import os
-import argparse
+import sys
 
 import pandas as pd
 import polars as pl
 import tushare as ts
 
+# 确保可以从脚本目录外导入 config 模块
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config.local import TUSHARE_TOKEN
 
 # ── 配置 ──────────────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 STOCKS_PATH = os.path.join(DATA_DIR, "stocks.parquet")
-CUTOFF_DATE = "20260105"          # 2026 年第一个交易日，与 kline_daily 对齐
+CUTOFF_DATE = "20260105"          # 与 kline_daily 起始交易日对齐
 FIELDS = "ts_code,symbol,name,list_status,list_date,delist_date"
 
-# 取消代理（Tushare 不走本地代理）
 for _key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
     os.environ.pop(_key, None)
 
 
-def fetch_stock_basic(pro) -> pl.DataFrame:
-    """拉取全市场股票基础信息（L + D + P 三种状态），返回 Polars DataFrame。"""
+def fetch_raw(pro) -> pl.DataFrame:
+    """L + D + P 三态全量拉取，返回含完整字段的 DataFrame。"""
     frames = []
     for status in ("L", "D", "P"):
         df = pro.stock_basic(list_status=status, fields=FIELDS)
         if df is not None and len(df) > 0:
             frames.append(df)
-            print(f"  list_status={status}: {len(df)} 只")
-
-    raw = pd.concat(frames, ignore_index=True)
-    return pl.DataFrame(raw.to_dict(orient="records"))
+    return pl.DataFrame(pd.concat(frames, ignore_index=True).to_dict(orient="records"))
 
 
-def filter_stocks(df: pl.DataFrame, silent: bool = False) -> pl.DataFrame:
-    """按筛选逻辑过滤，返回仅含 code, name 的 DataFrame。"""
-    total = len(df)
-
-    result = (
+def apply_filter(df: pl.DataFrame) -> pl.DataFrame:
+    """按 CUTOFF_DATE 过滤 D 状态，输出 (code, name)。"""
+    return (
         df
         .with_columns(pl.col("delist_date").cast(pl.Utf8).str.replace(r"\.0$", ""))
         .filter(
@@ -66,89 +55,77 @@ def filter_stocks(df: pl.DataFrame, silent: bool = False) -> pl.DataFrame:
                 & (pl.col("delist_date") > CUTOFF_DATE)
             )
         )
-        .select([
-            pl.col("symbol").alias("code"),
-            pl.col("name"),
-        ])
+        .select(pl.col("symbol").alias("code"), pl.col("name"))
         .with_columns(pl.col("code").cast(pl.Utf8).str.zfill(6))
         .sort("code")
     )
 
-    if not silent:
-        excluded = total - len(result)
-        cut = f"{CUTOFF_DATE[:4]}-{CUTOFF_DATE[4:6]}-{CUTOFF_DATE[6:]}"
-        print(f"  筛选结果：保留 {len(result)} 只，排除 {excluded} 只（{cut} 前退市）")
-    return result
 
+def diff(old: pl.DataFrame, new: pl.DataFrame):
+    """对比新旧股票列表，格式化输出差异。"""
+    old_map = dict(old.iter_rows())      # code → name
+    new_map = dict(new.iter_rows())
 
-def full_fetch():
-    """全量拉取股票列表。"""
-    pro = ts.pro_api(TUSHARE_TOKEN)
+    old_codes = set(old_map)
+    new_codes = set(new_map)
 
-    print("拉取 stock_basic 数据...")
-    df = fetch_stock_basic(pro)
+    added = sorted(new_codes - old_codes)
+    removed = sorted(old_codes - new_codes)
+    renamed = [
+        (c, old_map[c], new_map[c])
+        for c in sorted(old_codes & new_codes)
+        if old_map[c] != new_map[c]
+    ]
 
-    print(f"\n筛选（保留正常上市 + 退市日在 {CUTOFF_DATE} 之后）...")
-    stocks = filter_stocks(df)
+    print(f"\n  本地 {len(old_codes):,} 只 → 最新 {len(new_codes):,} 只")
 
-    stocks.write_parquet(STOCKS_PATH)
-    print(f"\n  → 已保存到 {STOCKS_PATH}")
-    print(f"  → 共 {len(stocks)} 只股票")
-
-
-def update():
-    """增量更新：与现有列表对比，有变更才写入。"""
-    if not os.path.exists(STOCKS_PATH):
-        print("未找到 stocks.parquet，切换到全量模式。")
-        full_fetch()
-        return
-
-    existing = pl.read_parquet(STOCKS_PATH)
-    existing_codes = set(existing["code"].to_list())
-
-    pro = ts.pro_api(TUSHARE_TOKEN)
-
-    print("拉取最新 stock_basic 数据...")
-    df = fetch_stock_basic(pro)
-    stocks = filter_stocks(df, silent=True)
-    new_codes = set(stocks["code"].to_list())
-
-    added = new_codes - existing_codes
-    removed = existing_codes - new_codes
-    existing_count = len(stocks)
-
-    print(f"\n  现有 {len(existing_codes)} 只 → 最新 {existing_count} 只")
     if added:
-        print(f"  新增 {len(added)} 只")
-        for c in sorted(added):
-            name = stocks.filter(pl.col("code") == c)["name"][0]
-            print(f"    + {c} {name}")
+        print(f"\n  ── 新增 {len(added)} 只 ──")
+        for c in added:
+            print(f"  + {c:6s}  {new_map[c]}")
+
     if removed:
-        print(f"  移除 {len(removed)} 只")
-        for c in sorted(removed):
-            name = existing.filter(pl.col("code") == c)["name"][0]
-            print(f"    - {c} {name}")
+        print(f"\n  ── 移除 {len(removed)} 只 ──")
+        for c in removed:
+            print(f"  - {c:6s}  {old_map[c]}")
 
-    if not added and not removed:
-        print("  无变更，跳过写入。")
-        return
+    if renamed:
+        print(f"\n  ── 名称变更 {len(renamed)} 只 ──")
+        for c, old_name, new_name in renamed:
+            print(f"  ~ {c:6s}  {old_name} → {new_name}")
 
-    stocks.write_parquet(STOCKS_PATH)
-    print(f"\n  → 已更新到 {STOCKS_PATH}")
+    if not added and not removed and not renamed:
+        print("  无变更")
 
 
 def main():
-    parser = argparse.ArgumentParser(description="股票列表更新脚本（Tushare stock_basic）")
-    parser.add_argument("--update", action="store_true", help="增量更新模式")
-    args = parser.parse_args()
-
     os.makedirs(DATA_DIR, exist_ok=True)
 
-    if args.update:
-        update()
-    else:
-        full_fetch()
+    # 1. 拉取全量
+    pro = ts.pro_api(TUSHARE_TOKEN)
+    print("拉取 stock_basic (L + D + P) ...")
+    raw = fetch_raw(pro)
+    print(f"  L + D + P 合计 {len(raw)} 只")
 
+    # 2. 过滤
+    print(f"\n筛选（L/P 全保留，D 仅 delist_date > {CUTOFF_DATE}）...")
+    new = apply_filter(raw)
+    print(f"  过滤后 {len(new)} 只")
+
+    # 3. 加载本地数据、对比
+    if os.path.exists(STOCKS_PATH):
+        old = pl.read_parquet(STOCKS_PATH)
+        diff(old, new)
+    else:
+        print(f"\n  首次运行，{len(new)} 只全部按新增处理")
+        for c in sorted(new["code"].to_list()[:10]):
+            print(f"  + {c:6s}  {new.filter(pl.col('code')==c)['name'][0]}")
+        if len(new) > 10:
+            print(f"  ... 共 {len(new)} 只")
+
+    # 4. 覆盖写入
+    new.write_parquet(STOCKS_PATH)
+    print(f"\n  → 已保存到 {STOCKS_PATH}")
     print("完成。")
 
 

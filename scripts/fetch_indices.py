@@ -12,12 +12,14 @@
 """
 
 import os
+import sys
 from datetime import date
 
 import pandas as pd
 import polars as pl
 import tushare as ts
 
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config.local import TUSHARE_TOKEN
 
 START_DATE = "20260105"  # 2026 年第一个交易日
