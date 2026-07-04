@@ -29,3 +29,6 @@ Thumbs.db
 
 # Local config (contains tokens)
 config/local.py
+
+# Memory sync tool (fetched from Feishu)
+scripts/sync_memory_from_feishu.py
