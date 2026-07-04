@@ -7,8 +7,6 @@
 """
 
 import os
-import random
-import time
 from datetime import date, timedelta
 
 import polars as pl
@@ -61,7 +59,6 @@ def main():
             success += 1
         else:
             failed += 1
-        time.sleep(0.3 + random.uniform(0.0, 0.2))
 
     print(f"  → 有新增数据 {success} 只，无数据 {failed} 只")
 
