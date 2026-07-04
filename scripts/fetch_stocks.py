@@ -19,11 +19,11 @@ import pandas as pd
 import polars as pl
 import tushare as ts
 
+from config.local import TUSHARE_TOKEN
+
 # ── 配置 ──────────────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 STOCKS_PATH = os.path.join(DATA_DIR, "stocks.parquet")
-
-TUSHARE_TOKEN = "b9c84e9a50444ef4c497adf0681acfa59646a6ba89b03fd393fbd53a"
 CUTOFF_DATE = "20260105"          # 2026 年第一个交易日，与 kline_daily 对齐
 FIELDS = "ts_code,symbol,name,list_status,list_date,delist_date"
 

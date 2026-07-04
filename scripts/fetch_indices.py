@@ -18,9 +18,10 @@ import pandas as pd
 import polars as pl
 import tushare as ts
 
+from config.local import TUSHARE_TOKEN
+
 START_DATE = "20260105"  # 2026 年第一个交易日
 END_DATE = date.today().strftime("%Y%m%d")
-TUSHARE_TOKEN = "b9c84e9a50444ef4c497adf0681acfa59646a6ba89b03fd393fbd53a"
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 
 # Tushare 格式的指数代码

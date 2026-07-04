@@ -26,3 +26,6 @@ reports/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local config (contains tokens)
+config/local.py

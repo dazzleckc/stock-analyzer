@@ -25,12 +25,13 @@ import pandas as pd
 import polars as pl
 import tushare as ts
 
+from config.local import TUSHARE_TOKEN
+
 # ── 路径 ──────────────────────────────────────────────
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 ST_STOCK_PATH = os.path.join(DATA_DIR, "st_stock.parquet")
 
 # ── 配置 ──────────────────────────────────────────────
-TUSHARE_TOKEN = "b9c84e9a50444ef4c497adf0681acfa59646a6ba89b03fd393fbd53a"
 START_DATE = "20260101"          # 接口数据起始日期
 MAX_RETRY = 3                    # 单次请求最大重试次数
 BATCH_DAYS = 5                   # 批量拉取天数（单批 < 1000 行限制）

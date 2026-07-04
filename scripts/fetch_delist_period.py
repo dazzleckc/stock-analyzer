@@ -21,10 +21,11 @@ import polars as pl
 import tushare as ts
 from tqdm import tqdm
 
+from config.local import TUSHARE_TOKEN
+
 # ---------------------------------------------------------------------------
 # 配置
 # ---------------------------------------------------------------------------
-TUSHARE_TOKEN = "b9c84e9a50444ef4c497adf0681acfa59646a6ba89b03fd393fbd53a"
 DATA_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
 ST_STOCK_PATH = os.path.join(DATA_DIR, "st_stock.parquet")
 OUTPUT_PATH = os.path.join(DATA_DIR, "delist_period.parquet")
