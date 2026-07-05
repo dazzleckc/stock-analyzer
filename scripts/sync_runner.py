@@ -127,7 +127,7 @@ def run_one(name: str, args: list[str], full: bool) -> ScriptResult:
 # 汇总报告
 # ═══════════════════════════════════════════════════════════════════
 
-STATUS_ICONS = {"success": "✓ 成功", "failed": "✗ 失败", "skipped": "- 跳过"}
+STATUS_ICONS = {"success": "V 成功", "failed": "X 失败", "skipped": "- 跳过"}
 
 
 def _fmt_row(i: int, r: ScriptResult) -> str:
@@ -157,6 +157,11 @@ def print_summary(results: dict, full: bool) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 def main() -> None:
+    # Windows GBK 终端兼容：强制 stdout 使用 utf-8
+    if sys.platform == "win32":
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
     args_ns = parse_args()
     full, date_val = args_ns.full, args_ns.date
     results: dict[str, ScriptResult] = {}

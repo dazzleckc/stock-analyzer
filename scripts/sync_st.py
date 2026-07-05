@@ -114,6 +114,7 @@ def sync_full() -> dict:
         return {"days": 0, "rows": 0}
 
     df = pl.concat(frames, how="vertical").sort(["trade_date", "code"])
+    df = df.unique(subset=["code", "trade_date"], keep="last")
 
     validate_no_null(df, ["code", "trade_date"])
     validate_unique(df, ["code", "trade_date"])

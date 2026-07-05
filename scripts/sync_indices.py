@@ -12,10 +12,12 @@
 
 import argparse
 import os
+from pathlib import Path
 import sys
 from datetime import date
 
 import polars as pl
+import tushare as ts
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import (                              # noqa: E402
@@ -60,8 +62,8 @@ def fetch_single_index(pro, ts_code: str, start_date: str, end_date: str) -> pl.
 
     @retry_on_failure(max_retries=3, base_delay=1.0)
     def _call_pro_bar():
-        return pro.pro_bar(
-            ts_code=ts_code, asset='I',
+        return ts.pro_bar(
+            ts_code=ts_code, api=pro, asset='I',
             start_date=start_date, end_date=end_date,
         )
 
@@ -75,7 +77,7 @@ def fetch_single_index(pro, ts_code: str, start_date: str, end_date: str) -> pl.
         missing_cols = _REQUIRED_RAW_COLUMNS - set(raw.columns)
         raise ValueError(f"Tushare 返回缺少必要列: {missing_cols}")
 
-    df = pl.from_pandas(raw)
+    df = pl.DataFrame(raw.to_dict(orient="records"))
 
     # code: ts_code 前 6 位
     df = df.with_columns(

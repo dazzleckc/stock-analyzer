@@ -1,7 +1,9 @@
 """A 股日K数据同步脚本
 
-数据源：Tushare Pro pro_bar (asset='E', adj='qfq', factors=['tor','vr'])
-策略：增量 truncate by trade_date，全量原子覆盖
+数据源：Tushare Pro pro_bar (asset='E', adj='qfq', factors=['tor'])
+策略：
+  全量 → 个股单文件 → 合并 → 原子覆盖（低内存 / 可续传 / 幂等）
+  增量 → truncate by trade_date，全量原子覆盖
 并发：ThreadPoolExecutor，共享 RateLimiter(500/min)
 
 使用方式：
@@ -13,13 +15,15 @@
 
 import argparse
 import os
+import shutil
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
+from pathlib import Path
 
-import pandas as pd
 import polars as pl
+import tushare as ts
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import (                              # noqa: E402
@@ -33,29 +37,34 @@ from config import (                              # noqa: E402
 )
 
 
+# ── 临时目录 ──────────────────────────────────────
+_KLINE_TMP_DIR = os.path.join(
+    os.path.dirname(KLINE_PATH), ".kline_tmp"
+)
+
+
 # ═══════════════════════════════════════════════════════════════════
-# 单只拉取
+# 单只拉取（pro_bar）
 # ═══════════════════════════════════════════════════════════════════
 
 @retry_on_failure(max_retries=3, base_delay=1.0)
 def fetch_single_kline(pro, code: str, start_date: str, end_date: str) -> pl.DataFrame | None:
-    """拉取单只股票日K，含换手率和量比。
+    """拉取单只股票日K（前复权 + 换手率）。
 
     参数:
-      pro: Tushare pro_api 实例
+      pro: Tushare pro_api 实例（通过 api=pro 传入 pro_bar）
       code: 6 位纯数字代码
       start_date: 起始日期 YYYYMMDD
       end_date: 结束日期 YYYYMMDD
 
     返回:
       Polars DataFrame（KLINE_COLUMNS 顺序），无数据返回 None。
-      返回 None 不是错误——该股票该日无交易是正常情况。
     """
     ts_code = code_to_ts_code(code)
-    raw = pro.pro_bar(
-        ts_code=ts_code, asset='E', adj='qfq',
+    raw = ts.pro_bar(
+        ts_code=ts_code, api=pro, asset='E', adj='qfq',
         start_date=start_date, end_date=end_date,
-        factors=['tor', 'vr'],
+        factors=['tor'],
     )
 
     if raw is None or raw.empty:
@@ -69,7 +78,6 @@ def fetch_single_kline(pro, code: str, start_date: str, end_date: str) -> pl.Dat
     )
 
     # 振幅 = (high - low) / pre_close * 100（pre_close=0 时返回 None）
-    # pre_close 在 select 阶段丢弃
     df = df.with_columns(
         pl.when(pl.col("pre_close") > 0)
         .then((pl.col("high") - pl.col("low")) / pl.col("pre_close") * 100)
@@ -77,7 +85,10 @@ def fetch_single_kline(pro, code: str, start_date: str, end_date: str) -> pl.Dat
         .alias("amplitude")
     )
 
-    return df.select([
+    # pro_bar(factors=['tor']) 返回的换手率列名通常是 turnover_rate
+    tor_col = "turnover_rate" if "turnover_rate" in df.columns else "tor"
+
+    selected = [
         pl.col("code"),
         pl.col("trade_date").str.to_date(format="%Y%m%d"),
         pl.col("open").cast(pl.Float64),
@@ -88,15 +99,59 @@ def fetch_single_kline(pro, code: str, start_date: str, end_date: str) -> pl.Dat
         pl.col("amount").cast(pl.Float64),
         pl.col("amplitude").cast(pl.Float64),
         pl.col("pct_chg").cast(pl.Float64).alias("pct_change"),
-        pl.col("turnover_rate").cast(pl.Float64),
-    ])
+    ]
+
+    if tor_col in df.columns:
+        selected.append(pl.col(tor_col).cast(pl.Float64).alias("turnover_rate"))
+    else:
+        selected.append(pl.lit(None).cast(pl.Float64).alias("turnover_rate"))
+
+    return df.select(selected)
 
 
 # ═══════════════════════════════════════════════════════════════════
-# Worker（线程池）
+# Worker（全量：个股单文件）
 # ═══════════════════════════════════════════════════════════════════
 
-def kline_worker(
+def _worker_full(
+    codes: list[str],
+    start_date: str,
+    end_date: str,
+    rate_limiter: RateLimiter,
+    error_log: list,
+    error_lock: threading.Lock,
+) -> int:
+    """全量 worker：独立 pro_api 实例，逐只拉取，每只写入独立 parquet。
+
+    写入路径: {_KLINE_TMP_DIR}/{code}.parquet
+    重试幂等：后写入覆盖前写入，天然去重。
+
+    返回: 成功写入的个股数。
+    """
+    pro = get_pro()
+    ok_count = 0
+    for code in codes:
+        rate_limiter.acquire()
+        try:
+            df = fetch_single_kline(pro, code, start_date, end_date)
+        except Exception as e:
+            with error_lock:
+                error_log.append((code, str(e)))
+            continue
+
+        if df is not None and len(df) > 0:
+            path = os.path.join(_KLINE_TMP_DIR, f"{code}.parquet")
+            df.write_parquet(path)
+            ok_count += 1
+
+    return ok_count
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Worker（增量：内存收集）
+# ═══════════════════════════════════════════════════════════════════
+
+def _worker_incremental(
     codes: list[str],
     start_date: str,
     end_date: str,
@@ -104,16 +159,9 @@ def kline_worker(
     error_log: list,
     error_lock: threading.Lock,
 ) -> list[pl.DataFrame]:
-    """线程 worker：独立 pro_api 实例，逐只拉取日K。
-
-    每个 worker 调用自己的 get_pro()，不共享 pro_api 实例（线程安全）。
-    失败记录追加到共享 error_log。
-
-    返回: 成功拉取的 DataFrame 列表。
-    """
+    """增量 worker：独立 pro_api 实例，原内存收集方案。"""
     pro = get_pro()
-    frames = []
-
+    frames: list[pl.DataFrame] = []
     for code in codes:
         rate_limiter.acquire()
         try:
@@ -153,41 +201,67 @@ def _chunk_list(lst: list, n: int) -> list[list]:
     ]
 
 
+def _ensure_tmp_dir():
+    """确保临时目录存在。"""
+    os.makedirs(_KLINE_TMP_DIR, exist_ok=True)
+
+
+def _cleanup_tmp_dir():
+    """删除临时目录及全部个股 parquet。"""
+    if os.path.exists(_KLINE_TMP_DIR):
+        shutil.rmtree(_KLINE_TMP_DIR)
+
+
+def _merge_tmp_files() -> pl.DataFrame:
+    """读取临时目录下所有个股 parquet，合并为一个 DataFrame。"""
+    files = sorted(Path(_KLINE_TMP_DIR).glob("*.parquet"))
+    if not files:
+        raise FileNotFoundError(f"临时目录 {_KLINE_TMP_DIR} 为空，无数据可合并")
+
+    frames = [pl.read_parquet(str(f)) for f in files]
+    return pl.concat(frames, how="vertical")
+
+
 # ═══════════════════════════════════════════════════════════════════
-# 核心函数：sync_full / sync_incremental（两个独立函数）
+# 核心函数：sync_full
 # ═══════════════════════════════════════════════════════════════════
 
 def sync_full(max_workers: int = 5) -> dict:
-    """全量初始化：从 KLINE_START_DATE 到 today，拉取所有活跃股票的日K。
-
-    直接原子覆盖 KLINE_PATH，不保留旧数据。
+    """全量初始化：个股单文件 → 合并 → 原子覆盖。
 
     返回: {"stocks": int, "rows": int, "failed": list[str]}
     """
     today_str = date.today().strftime("%Y%m%d")
     codes = _load_active_codes()
+    total = len(codes)
 
     print(f"全量初始化日K（{KLINE_START_DATE} ~ {today_str}）")
-    print(f"  活跃股票 {len(codes)} 只，{max_workers} 线程并发")
+    print(f"  活跃股票 {total} 只，{max_workers} 线程并发")
+    print(f"  临时目录: {_KLINE_TMP_DIR}")
 
-    rate_limiter = RateLimiter(max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW)
+    _cleanup_tmp_dir()
+    _ensure_tmp_dir()
+
+    rate_limiter = RateLimiter(
+        max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW,
+    )
     error_log: list[tuple[str, str]] = []
     error_lock = threading.Lock()
 
     chunks = _chunk_list(codes, max_workers)
 
-    all_frames: list[pl.DataFrame] = []
+    ok_total = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                kline_worker, chunk, KLINE_START_DATE, today_str,
+                _worker_full, chunk, KLINE_START_DATE, today_str,
                 rate_limiter, error_log, error_lock,
             )
             for chunk in chunks
         ]
 
         for future in as_completed(futures):
-            all_frames.extend(future.result())
+            ok_total += future.result()
 
     if error_log:
         print(f"  ⚠ {len(error_log)} 只股票拉取失败")
@@ -196,14 +270,16 @@ def sync_full(max_workers: int = 5) -> dict:
         if len(error_log) > 5:
             print(f"    ... 共 {len(error_log)} 只")
 
-    if not all_frames:
+    if ok_total == 0:
         print("  未拉取到任何日K数据")
+        _cleanup_tmp_dir()
         return {
-            "stocks": len(codes), "rows": 0,
+            "stocks": total, "rows": 0,
             "failed": [e[0] for e in error_log],
         }
 
-    df = pl.concat(all_frames, how="vertical")
+    print(f"  合并 {ok_total} 只个股文件...")
+    df = _merge_tmp_files()
     validate_no_null(df, KLINE_REQUIRED_NONNULL)
     validate_unique(df, ["code", "trade_date"])
 
@@ -211,17 +287,23 @@ def sync_full(max_workers: int = 5) -> dict:
     print(f"  → {len(df)} 行（{df['code'].n_unique()} 只股票，"
           f"{df['trade_date'].n_unique()} 个交易日）已保存到 {KLINE_PATH}")
 
+    _cleanup_tmp_dir()
+
     return {
-        "stocks": len(codes), "rows": len(df),
+        "stocks": total, "rows": len(df),
         "failed": [e[0] for e in error_log],
     }
 
 
+# ═══════════════════════════════════════════════════════════════════
+# 核心函数：sync_incremental（保持内存方案）
+# ═══════════════════════════════════════════════════════════════════
+
 def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
-    """增量同步：拉取指定日期的日K（默认今天），truncate by trade_date。
+    """增量同步：拉取指定日期（默认今天），truncate by trade_date。
 
     参数:
-      target_date: 目标日期 YYYYMMDD，默认 date.today()
+      target_date: YYYYMMDD，默认 date.today()
       max_workers: 并发线程数，默认 5
 
     返回: {"stocks": int, "rows": int, "failed": list[str], "date": str}
@@ -234,7 +316,9 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
     print(f"增量同步日K（{target_date}）")
     print(f"  活跃股票 {len(codes)} 只，{max_workers} 线程并发")
 
-    rate_limiter = RateLimiter(max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW)
+    rate_limiter = RateLimiter(
+        max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW,
+    )
     error_log: list[tuple[str, str]] = []
     error_lock = threading.Lock()
 
@@ -244,7 +328,7 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [
             executor.submit(
-                kline_worker, chunk, target_date, target_date,
+                _worker_incremental, chunk, target_date, target_date,
                 rate_limiter, error_log, error_lock,
             )
             for chunk in chunks
@@ -273,8 +357,10 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
     validate_unique(df, ["code", "trade_date"])
 
     date_dashed = ymd_to_dashed(target_date)
-    truncate_and_insert(df, KLINE_PATH, key_column="trade_date",
-                        key_values=[date_dashed])
+    truncate_and_insert(
+        df, KLINE_PATH, key_column="trade_date",
+        key_values=[date_dashed],
+    )
 
     print(f"  → {len(df)} 行（{df['code'].n_unique()} 只股票）已写入 {target_date}")
 
@@ -290,7 +376,6 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
 # ═══════════════════════════════════════════════════════════════════
 
 def _validate_date_arg(s: str) -> str:
-    """argparse type 校验函数：确保 --date 参数为 YYYYMMDD 格式。"""
     if len(s) != 8 or not s.isdigit():
         raise argparse.ArgumentTypeError(
             f"日期格式必须为 YYYYMMDD，收到: {s!r}"
