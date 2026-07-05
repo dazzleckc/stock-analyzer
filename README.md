@@ -52,6 +52,7 @@ stock-analyzer/
 │   ├── sync_indices.py             # 指数数据同步（Tushare pro_bar）
 │   ├── sync_st.py                  # ST 状态数据同步（Tushare stock_st）
 │   ├── sync_delist.py              # 退市整理期数据同步（Tushare st）
+│   ├── sync_runner.py              # 统一入口，自动处理依赖顺序
 │   ├── indicators.py               # 技术指标计算（MA/RSI/波动率/新高新低等）
 │   ├── screener.py                 # 个股筛选器（基于 K 线条件 + 行业 + 基本面）
 │   └── market_thermometer.py       # 市场温度计分析模块
@@ -137,31 +138,39 @@ tqdm>=4.60.0
 ### 数据初始化（首次使用或重建）
 
 ```bash
-# 1. 同步股票列表
-python scripts/sync_stocks.py --full
-
-# 2. 同步全量日线
-python scripts/sync_kline.py --full
-
-# 3. 同步指数数据
-python scripts/sync_indices.py --full
-
-# 4. 同步 ST 状态数据
-python scripts/sync_st.py --full
-
-# 5. 同步退市整理期数据
-python scripts/sync_delist.py --full
+# 一键全量初始化（自动处理依赖顺序）
+python scripts/sync_runner.py --full
 ```
+
+等价于按依赖顺序依次执行 5 个 `sync_*.py`：
+1. `sync_stocks.py --full` — 股票列表 + 变更日志
+2. `sync_st.py --full` — ST 风险警示数据
+3. `sync_indices.py --full` — 指数日线
+4. `sync_kline.py --full` — 个股日K（依赖步骤1）
+5. `sync_delist.py --full` — 退市整理期（依赖步骤2）
+
+任一脚本失败时，依赖它的下游脚本自动跳过，最后打印汇总表。
 
 ### 日常更新
 
 ```bash
-python scripts/sync_stocks.py      # 增量更新股票列表（建议每日）
-python scripts/sync_kline.py       # 增量更新日线（建议每日）
-python scripts/sync_indices.py     # 增量更新指数（建议每日）
-python scripts/sync_st.py          # 增量更新 ST 状态（有变动时运行）
-python scripts/sync_delist.py      # 增量更新退市整理期（有变动时运行）
+# 一键增量更新（默认今天）
+python scripts/sync_runner.py
+
+# 补拉指定日期
+python scripts/sync_runner.py --date 20260701
 ```
+
+自动按依赖顺序执行 5 个 `sync_*.py` 的增量模式。
+
+### 统一入口说明
+
+`sync_runner.py` 封装了数据同步的完整流程：
+
+- **自动依赖排序**：先 Layer 1（stocks / ST / indices），再 Layer 2（kline / delist）
+- **失败隔离**：Layer 1 某脚本失败 → 对应 Layer 2 跳过，其他不受影响
+- **汇总报告**：每个脚本的状态、耗时和结果一目了然
+- **退出码**：全部成功返回 0，任一失败返回 1，可在 CI / cron 中使用
 
 ### 使用示例
 
