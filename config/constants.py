@@ -81,3 +81,35 @@ DELIST_SCHEMA = {
 TUSHARE_RATE_LIMIT = 500            # 次/分钟
 TUSHARE_RATE_WINDOW = 60.0          # 秒
 MAX_RETRIES = 3                     # 单次请求最大重试次数
+
+# ── indices.parquet schema ───────────────────────
+INDICES_PATH = os.path.join(DATA_DIR, "indices.parquet")
+
+INDEX_LIST = {
+    "000001.SH": "上证指数",
+    "899050.BJ": "北证50",
+    "399001.SZ": "深证成指",
+    "399006.SZ": "创业板指",
+    "000688.SH": "科创50",
+    "000300.SH": "沪深300",
+}
+
+# 与 KLINE_COLUMNS 内容对齐，但独立定义以保持防御性解耦
+INDICES_COLUMNS = [
+    "code", "trade_date",
+    "open", "high", "low", "close",
+    "volume", "amount",
+    "amplitude", "pct_change", "turnover_rate",
+]
+
+INDICES_SCHEMA = {
+    "code": pl.Utf8,
+    "trade_date": pl.Date,
+    "open": pl.Float64, "high": pl.Float64,
+    "low": pl.Float64, "close": pl.Float64,
+    "volume": pl.Int64, "amount": pl.Float64,
+    "amplitude": pl.Float64, "pct_change": pl.Float64,
+    "turnover_rate": pl.Float64,
+}
+
+INDICES_REQUIRED_NONNULL = ["code", "trade_date", "close"]
