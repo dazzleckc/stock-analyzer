@@ -40,19 +40,18 @@ stock-analyzer/
 │   └── local.py                    # 敏感配置（已 .gitignore）
 ├── requirements.txt
 ├── data/                           # Parquet 数据文件
-│   ├── stocks.parquet              # 全市场股票列表（code, name）
-│   ├── kline_daily.parquet         # 日线数据（5,542 只 × 119 日）
-│   ├── indices.parquet             # 主要指数日线（8 指数 + 全市场）
-│   ├── st_stock.parquet            # ST 风险警示板数据（289 只）
-│   └── delist_period.parquet       # 退市整理期记录（15 只）
+│   ├── stocks.parquet              # 全市场股票列表（code, name, list_status, delist_date）
+│   ├── stocks_changelog.parquet    # 股票列表变更日志
+│   ├── kline_daily.parquet         # 日线数据
+│   ├── indices.parquet             # 主要指数日线（7 指数 + 全市场）
+│   ├── st_stock.parquet            # ST 风险警示板数据
+│   └── delist_period.parquet       # 退市整理期记录
 ├── scripts/
-│   ├── fetch_kline.py              # 日K全量拉取（Tushare pro_bar）
-│   ├── update_kline.py             # 日K增量更新
-│   ├── fetch_indices.py            # 指数全量拉取（Tushare pro_bar）
-│   ├── update_indices.py           # 指数增量更新
-│   ├── fetch_stocks.py             # 股票列表筛选（Tushare stock_basic）
-│   ├── fetch_st_stock.py           # ST 股票数据采集（Tushare stock_st）
-│   ├── fetch_delist_period.py      # 退市整理期数据采集（Tushare st）
+│   ├── sync_stocks.py              # 股票列表同步（Tushare stock_basic）
+│   ├── sync_kline.py               # 日K数据同步（Tushare pro_bar）
+│   ├── sync_indices.py             # 指数数据同步（Tushare pro_bar）
+│   ├── sync_st.py                  # ST 状态数据同步（Tushare stock_st）
+│   ├── sync_delist.py              # 退市整理期数据同步（Tushare st）
 │   ├── indicators.py               # 技术指标计算（MA/RSI/波动率/新高新低等）
 │   ├── screener.py                 # 个股筛选器（基于 K 线条件 + 行业 + 基本面）
 │   └── market_thermometer.py       # 市场温度计分析模块
@@ -79,11 +78,11 @@ stock-analyzer/
 
 | 接口 | 用途 | 对应脚本 |
 |------|------|---------|
-| `pro_bar` (asset='E') | 个股前复权日线（OHLCV + 换手率 + 量比） | `fetch_kline.py` / `update_kline.py` |
-| `pro_bar` (asset='I') | 指数日线（8 只主要指数 + 全市场汇总） | `fetch_indices.py` / `update_indices.py` |
-| `stock_basic` | 全市场股票列表 + 退市日期过滤 | `fetch_stocks.py` |
-| `stock_st` | ST 风险警示板每日标记 | `fetch_st_stock.py` |
-| `st` | 风险警示生命周期事件（含退市整理期） | `fetch_delist_period.py` |
+| `pro_bar` (asset='E') | 个股前复权日线（OHLCV + 换手率 + 量比） | `sync_kline.py` |
+| `pro_bar` (asset='I') | 指数日线（7 只主要指数 + 全市场汇总） | `sync_indices.py` |
+| `stock_basic` | 全市场股票列表 + 退市日期过滤 | `sync_stocks.py` |
+| `stock_st` | ST 风险警示板每日标记 | `sync_st.py` |
+| `st` | 风险警示生命周期事件（含退市整理期） | `sync_delist.py` |
 
 Tushare Token 需要 ≥ 120 积分（日线接口权限），6000 积分可获得 ST 数据。
 
@@ -133,32 +132,35 @@ tqdm>=4.60.0
 
 ## 使用指南
 
-> 📅 **预置数据**：仓库附带 `data/` 下的 Parquet 文件，覆盖 **2026-01-05 ~ 2026-07-03**（119 个交易日）。clone 即可用，无需跑全量初始化。日后更新执行增量脚本。
+> 📅 **数据获取**：clone 后运行 `sync_* --full` 拉取全量数据。历史数据覆盖 2026-01-05 起的所有交易日。
 
 ### 数据初始化（首次使用或重建）
 
 ```bash
-# 1. 获取股票列表（约 10s）
-python scripts/fetch_stocks.py
+# 1. 同步股票列表
+python scripts/sync_stocks.py --full
 
-# 2. 拉取全量日线（约 24min，5,542 只 × 119 日）
-python scripts/fetch_kline.py
+# 2. 同步全量日线
+python scripts/sync_kline.py --full
 
-# 3. 拉取指数数据（约 1min）
-python scripts/fetch_indices.py
+# 3. 同步指数数据
+python scripts/sync_indices.py --full
 
-# 4. 拉取 ST 股票数据（约 30s）
-python scripts/fetch_st_stock.py
+# 4. 同步 ST 状态数据
+python scripts/sync_st.py --full
 
-# 5. 拉取退市整理期数据（约 3min）
-python scripts/fetch_delist_period.py
+# 5. 同步退市整理期数据
+python scripts/sync_delist.py --full
 ```
 
 ### 日常更新
 
 ```bash
-python scripts/update_kline.py     # 增量更新日线
-python scripts/update_indices.py   # 增量更新指数
+python scripts/sync_stocks.py      # 增量更新股票列表（建议每日）
+python scripts/sync_kline.py       # 增量更新日线（建议每日）
+python scripts/sync_indices.py     # 增量更新指数（建议每日）
+python scripts/sync_st.py          # 增量更新 ST 状态（有变动时运行）
+python scripts/sync_delist.py      # 增量更新退市整理期（有变动时运行）
 ```
 
 ### 使用示例
@@ -237,6 +239,15 @@ clean = kline.filter(~pl.col("code").is_in(st_codes))
 | pct_change | f64 | % | 涨跌幅 |
 | turnover_rate | f64 | % | 换手率 |
 
+### stocks.parquet
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| code | str | 6 位股票代码 |
+| name | str | 股票名称 |
+| list_status | str | 上市状态（L=上市, D=退市, P=暂停上市） |
+| delist_date | str | 退市日期（上市中为 null） |
+
 ## 市场温度计指标说明
 
 基于"趋势市场温度计 v15"的因子体系：
@@ -271,7 +282,7 @@ clean = kline.filter(~pl.col("code").is_in(st_codes))
 - **AI 是工具，不是替身**：每段代码你必须理解并能解释。
 - **绝不盲信**：AI 会幻觉 API、写出错误逻辑，未经本地验证不得提交。
 - **最小 diff**：只改需求相关的代码，不顺手重构。
-- **提交脚本，不提交数据**：`data/raw/` 和 `reports/` 已在 `.gitignore` 排除；最终产出（parquet）因体量小提交以供开箱即用。
+- **提交脚本，不提交数据**：`data/raw/` 和 `reports/` 已在 `.gitignore` 排除。clone 后运行 `sync_* --full` 拉取数据。
 
 **流程：** `dev` 切分支 → 开发 + 自检 → PR → `dev`，`main` 分支 Squash Merge。
 

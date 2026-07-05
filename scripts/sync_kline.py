@@ -23,12 +23,13 @@ import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import (                              # noqa: E402
-    get_pro, code_to_ts_code,
+    get_pro, code_to_ts_code, ymd_to_dashed,
     KLINE_PATH, STOCKS_PATH, KLINE_START_DATE,
     KLINE_COLUMNS, KLINE_REQUIRED_NONNULL,
     truncate_and_insert, atomic_write_parquet,
     validate_no_null, validate_unique,
     RateLimiter, retry_on_failure,
+    TUSHARE_RATE_LIMIT, TUSHARE_RATE_WINDOW,
 )
 
 
@@ -134,6 +135,10 @@ def kline_worker(
 
 def _load_active_codes() -> list[str]:
     """读取 stocks.parquet，过滤 list_status != 'D'，返回 codes 列表。"""
+    if not os.path.exists(STOCKS_PATH):
+        raise FileNotFoundError(
+            f"未找到 {STOCKS_PATH}，请先运行 sync_stocks.py --full"
+        )
     stocks = pl.read_parquet(STOCKS_PATH)
     active = stocks.filter(pl.col("list_status") != "D")
     return sorted(active["code"].to_list())
@@ -146,11 +151,6 @@ def _chunk_list(lst: list, n: int) -> list[list]:
         lst[i * k + min(i, m): (i + 1) * k + min(i + 1, m)]
         for i in range(n)
     ]
-
-
-def _ymd_to_dashed(ymd: str) -> str:
-    """YYYYMMDD → YYYY-MM-DD（truncate_and_insert 需要此格式）。"""
-    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -170,7 +170,7 @@ def sync_full(max_workers: int = 5) -> dict:
     print(f"全量初始化日K（{KLINE_START_DATE} ~ {today_str}）")
     print(f"  活跃股票 {len(codes)} 只，{max_workers} 线程并发")
 
-    rate_limiter = RateLimiter(max_calls=500, window_seconds=60.0)
+    rate_limiter = RateLimiter(max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW)
     error_log: list[tuple[str, str]] = []
     error_lock = threading.Lock()
 
@@ -234,7 +234,7 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
     print(f"增量同步日K（{target_date}）")
     print(f"  活跃股票 {len(codes)} 只，{max_workers} 线程并发")
 
-    rate_limiter = RateLimiter(max_calls=500, window_seconds=60.0)
+    rate_limiter = RateLimiter(max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW)
     error_log: list[tuple[str, str]] = []
     error_lock = threading.Lock()
 
@@ -272,7 +272,7 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
     validate_no_null(df, KLINE_REQUIRED_NONNULL)
     validate_unique(df, ["code", "trade_date"])
 
-    date_dashed = _ymd_to_dashed(target_date)
+    date_dashed = ymd_to_dashed(target_date)
     truncate_and_insert(df, KLINE_PATH, key_column="trade_date",
                         key_values=[date_dashed])
 
@@ -289,6 +289,15 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
 # CLI
 # ═══════════════════════════════════════════════════════════════════
 
+def _validate_date_arg(s: str) -> str:
+    """argparse type 校验函数：确保 --date 参数为 YYYYMMDD 格式。"""
+    if len(s) != 8 or not s.isdigit():
+        raise argparse.ArgumentTypeError(
+            f"日期格式必须为 YYYYMMDD，收到: {s!r}"
+        )
+    return s
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="A 股日K数据同步：全量初始化 / 增量兜底"
@@ -298,7 +307,7 @@ def main():
         help="全量初始化模式（从 KLINE_START_DATE 到 today）"
     )
     parser.add_argument(
-        "--date", type=str, default=None,
+        "--date", type=_validate_date_arg, default=None,
         help="指定日期 YYYYMMDD（增量模式，默认今天）"
     )
     parser.add_argument(

@@ -5,12 +5,8 @@ venv/
 .venv/
 *.egg-info/
 
-# Data files — 忽略中间产物，保留最终产出
+# Data files — 忽略中间产物
 data/raw/
-# 以下三项不受 data/raw/ 影响，明确允许提交
-!data/stocks.parquet
-!data/kline_daily.parquet
-!data/indices.parquet
 
 # Generated reports
 reports/

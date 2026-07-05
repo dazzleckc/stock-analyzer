@@ -35,7 +35,7 @@ from config.constants import (          # noqa: F401
 )
 
 from config.tushare_utils import (      # noqa: F401
-    get_pro, clear_proxy, code_to_ts_code,
+    get_pro, clear_proxy, code_to_ts_code, ymd_to_dashed,
 )
 
 from config.retry import retry_on_failure  # noqa: F401

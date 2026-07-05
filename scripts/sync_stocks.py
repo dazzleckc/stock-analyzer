@@ -164,7 +164,7 @@ def append_changelog(changelog_df: pl.DataFrame) -> None:
 # ═══════════════════════════════════════════════════════════════════
 
 def print_diff(old: pl.DataFrame, new: pl.DataFrame, changelog_df: pl.DataFrame):
-    """格式化输出差异，风格对齐 fetch_stocks.py。"""
+    """格式化输出差异。"""
     print(f"\n  本地 {old.height:,} 只 → 最新 {new.height:,} 只")
 
     added = changelog_df.filter(pl.col("field") == "_new_")

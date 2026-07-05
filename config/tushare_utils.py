@@ -46,3 +46,13 @@ def code_to_ts_code(code: str) -> str:
     if c[0] == "9":
         return c + ".BJ"
     return c + ".SZ"
+
+
+def ymd_to_dashed(ymd: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD（供 truncate_and_insert 的 key_values 使用）。
+
+    带格式校验：必须为 8 位数字。
+    """
+    if len(ymd) != 8 or not ymd.isdigit():
+        raise ValueError(f"期望 YYYYMMDD 格式(8位数字)，实际: {ymd!r}")
+    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"

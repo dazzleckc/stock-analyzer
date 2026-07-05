@@ -20,7 +20,8 @@ import polars as pl
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import (                              # noqa: E402
     ST_STOCK_PATH, ST_COLUMNS,
-    get_pro, truncate_and_insert, atomic_write_parquet,
+    get_pro, ymd_to_dashed,
+    truncate_and_insert, atomic_write_parquet,
     validate_no_null, validate_unique,
 )
 
@@ -75,15 +76,6 @@ def _transform(raw: pl.DataFrame) -> pl.DataFrame:
         .select(ST_COLUMNS)
         .sort(["trade_date", "code"])
     )
-
-
-# ═══════════════════════════════════════════════════════════════════
-# 日期工具
-# ═══════════════════════════════════════════════════════════════════
-
-def _ymd_to_dashed(ymd: str) -> str:
-    """YYYYMMDD → YYYY-MM-DD（truncate_and_insert 需要此格式）。"""
-    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -157,7 +149,7 @@ def sync_incremental(target_date: str = None) -> dict:
     validate_no_null(df, ["code", "trade_date"])
     validate_unique(df, ["code", "trade_date"])
 
-    date_dashed = _ymd_to_dashed(target_date)
+    date_dashed = ymd_to_dashed(target_date)
     truncate_and_insert(
         df, ST_STOCK_PATH,
         key_column="trade_date", key_values=[date_dashed],
@@ -172,6 +164,15 @@ def sync_incremental(target_date: str = None) -> dict:
 # CLI
 # ═══════════════════════════════════════════════════════════════════
 
+def _validate_date_arg(s: str) -> str:
+    """argparse type 校验函数：确保 --date 参数为 YYYYMMDD 格式。"""
+    try:
+        ymd_to_dashed(s)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
+    return s
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="ST 状态数据同步：增量 truncate / 全量原子覆盖"
@@ -179,6 +180,10 @@ def main():
     parser.add_argument(
         "--full", action="store_true",
         help="全量初始化模式"
+    )
+    parser.add_argument(
+        "--date", type=_validate_date_arg, default=None,
+        help="指定日期 YYYYMMDD（增量模式，默认今天）"
     )
     args = parser.parse_args()
 
@@ -188,7 +193,7 @@ def main():
             f"\n完成。{result['days']} 个交易日，{result['rows']} 行"
         )
     else:
-        result = sync_incremental()
+        result = sync_incremental(target_date=args.date)
         print(
             f"\n完成。{result['rows']} 行，日期 {result['date']}"
         )

@@ -96,7 +96,7 @@ script, indicator, screener, report, template, data, docs
 
 #### 数据文件永不提交
 
-`data/` 和 `reports/` 目录已在 `.gitignore` 中排除。提交的是**生成数据的脚本**，而非数据本身。
+`data/` 和 `reports/` 目录已在 `.gitignore` 中排除。提交的是**生成数据的脚本**，而非数据本身。clone 后运行 `sync_* --full` 拉取数据。
 
 ### 提交前自检清单（贡献者侧）
 

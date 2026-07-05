@@ -20,7 +20,7 @@ class RateLimiter:
       def worker():
           for code in my_codes:
               limiter.acquire()      # 阻塞直到有可用配额
-              fetch_kline(code)      # 安全调用 API
+              sync_kline(code)      # 安全调用 API
     """
 
     def __init__(self, max_calls: int = 500, window_seconds: float = 60.0):

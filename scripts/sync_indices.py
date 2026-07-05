@@ -19,7 +19,7 @@ import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import (                              # noqa: E402
-    get_pro,
+    get_pro, ymd_to_dashed,
     INDICES_PATH, INDICES_COLUMNS, INDICES_REQUIRED_NONNULL,
     INDEX_LIST, KLINE_START_DATE, INDICES_SCHEMA,
     truncate_and_insert, atomic_write_parquet,
@@ -144,19 +144,15 @@ def build_market_aggregate(df: pl.DataFrame) -> pl.DataFrame:
 # 工具
 # ═══════════════════════════════════════════════════════════════════
 
-def _ymd_to_dashed(ymd: str) -> str:
-    """YYYYMMDD → YYYY-MM-DD。"""
-    if len(ymd) != 8 or not ymd.isdigit():
-        raise ValueError(f"期望 YYYYMMDD 格式(8位数字)，实际: {ymd!r}")
-    return f"{ymd[:4]}-{ymd[4:6]}-{ymd[6:8]}"
-
-
 def _validate_date_arg(s: str) -> str:
-    """argparse type 校验函数：确保 --date 参数为 YYYYMMDD 格式。"""
-    if len(s) != 8 or not s.isdigit():
-        raise argparse.ArgumentTypeError(
-            f"日期格式必须为 YYYYMMDD，收到: {s!r}"
-        )
+    """argparse type 校验函数：确保 --date 参数为 YYYYMMDD 格式。
+
+    委托 ymd_to_dashed 做校验，确保未来校验逻辑增强后自动同步受益。
+    """
+    try:
+        ymd_to_dashed(s)
+    except ValueError as e:
+        raise argparse.ArgumentTypeError(str(e))
     return s
 
 
@@ -268,8 +264,8 @@ def sync_incremental(target_date: str = None) -> dict:
 
     _validate_schema(df)
 
-    date_dashed = _ymd_to_dashed(target_date)
     try:
+        date_dashed = ymd_to_dashed(target_date)
         truncate_and_insert(df, INDICES_PATH, key_column="trade_date",
                             key_values=[date_dashed])
     except Exception as e:
