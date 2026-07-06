@@ -29,8 +29,15 @@ class RateLimiter:
         self._timestamps: deque[float] = deque()
         self._lock = threading.Lock()
 
-    def acquire(self):
-        """阻塞直到有可用配额。"""
+    def acquire(self, count: int = 1):
+        """阻塞直到有可用配额。
+
+        count: 本次调用消耗的配额数（默认 1）。
+               例如 pro_bar 一次消费 3 个 API 调用，调用方传入 count=3。
+        """
+        if count < 1:
+            raise ValueError(f"count 必须 >= 1，收到: {count}")
+
         while True:
             with self._lock:
                 now = time.time()
@@ -39,12 +46,17 @@ class RateLimiter:
                 while self._timestamps and self._timestamps[0] < cutoff:
                     self._timestamps.popleft()
 
-                if len(self._timestamps) < self._max_calls:
-                    self._timestamps.append(now)
+                if len(self._timestamps) + count <= self._max_calls:
+                    for _ in range(count):
+                        self._timestamps.append(now)
                     return  # 获权，立即返回
 
                 # 在锁内计算 sleep_time
-                sleep_time = self._timestamps[0] - cutoff + 0.01
+                needed = (len(self._timestamps) + count) - self._max_calls
+                if needed > len(self._timestamps):
+                    sleep_time = self._window + 0.01
+                else:
+                    sleep_time = self._timestamps[needed - 1] - cutoff + 0.01
 
             # 锁外 sleep
             if sleep_time > 0:

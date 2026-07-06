@@ -32,7 +32,7 @@ from config import (                              # noqa: E402
 )
 
 # Tushare st 接口请求字段（pub_date 用于 API 过滤和返回，落盘时重命名为 imp_date）
-ST_FIELDS = "ts_code,name,pub_date,st_tpye,st_reason"
+ST_FIELDS = "ts_code,name,pub_date,st_tpye"
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -65,12 +65,8 @@ def _ymd_to_date(ymd: str) -> date:
 
 
 def _filter_delist(df: pl.DataFrame) -> pl.DataFrame:
-    """筛选退市相关记录：st_tpye 或 st_reason 含"退市"."""
-    has_reason = "st_reason" in df.columns
-    mask = pl.col("st_tpye").cast(pl.Utf8).str.contains("退市")
-    if has_reason:
-        mask = mask | pl.col("st_reason").cast(pl.Utf8).str.contains("退市")
-    return df.filter(mask)
+    """筛选退市相关记录：st_type == '退市整理期'."""
+    return df.filter(pl.col("st_tpye") == "退市整理期")
 
 
 def _extract_code(ts_code) -> str | None:
@@ -108,8 +104,8 @@ def _scan_pub_date_window(
 ) -> list[dict]:
     """逐日扫描 pub_date 窗口，拉取退市公告。
 
-    对窗口内每一天调用 pro.st(pub_date=date)，筛选 st_tpye 或
-    st_reason 包含"退市"的记录，返回标准化的 dict 列表。
+    对窗口内每一天调用 pro.st(pub_date=date)，筛选 st_tpye ==
+    "退市整理期"的记录，返回标准化的 dict 列表。
 
     返回: [{"code": str, "name": str, "imp_date": str}, ...]
 

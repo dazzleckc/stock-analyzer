@@ -17,7 +17,6 @@ import os
 import sys
 from datetime import datetime
 
-import pandas as pd
 import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
@@ -36,15 +35,17 @@ FIELDS = "ts_code,symbol,name,list_status,list_date,delist_date"
 # ═══════════════════════════════════════════════════════════════════
 
 def fetch_stock_basic_all(pro) -> pl.DataFrame:
-    """L + D + P 三态全量拉取，返回含完整字段的 DataFrame。"""
+    """L + D + P 三态全量拉取，返回含完整字段的 DataFrame。
+
+    每个状态独立转 Polars 再 concat，避免混合 null/string 列
+    导致 Polars schema 推断失败（"overflow the data-type's capacity"）。
+    """
     frames = []
     for status in ("L", "D", "P"):
-        df = pro.stock_basic(list_status=status, fields=FIELDS)
-        if df is not None and len(df) > 0:
-            frames.append(df)
-    return pl.DataFrame(
-        pd.concat(frames, ignore_index=True).to_dict(orient="records")
-    )
+        pdf = pro.stock_basic(list_status=status, fields=FIELDS)
+        if pdf is not None and len(pdf) > 0:
+            frames.append(pl.from_pandas(pdf))
+    return pl.concat(frames, how="vertical")
 
 
 # ═══════════════════════════════════════════════════════════════════

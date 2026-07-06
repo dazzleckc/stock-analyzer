@@ -131,7 +131,7 @@ def _worker_full(
     pro = get_pro()
     ok_count = 0
     for code in codes:
-        rate_limiter.acquire()
+        rate_limiter.acquire(count=3)  # pro_bar 内部调用 daily + daily_basic + adj_factor
         try:
             df = fetch_single_kline(pro, code, start_date, end_date)
         except Exception as e:
@@ -163,7 +163,7 @@ def _worker_incremental(
     pro = get_pro()
     frames: list[pl.DataFrame] = []
     for code in codes:
-        rate_limiter.acquire()
+        rate_limiter.acquire(count=3)  # pro_bar 内部调用 daily + daily_basic + adj_factor
         try:
             df = fetch_single_kline(pro, code, start_date, end_date)
         except Exception as e:
