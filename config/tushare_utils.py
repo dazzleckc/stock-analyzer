@@ -11,8 +11,12 @@ from config.local import TUSHARE_TOKEN
 
 
 def clear_proxy():
-    """清除 HTTP/HTTPS 代理环境变量（Tushare 直连不走代理）。"""
-    for key in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY"):
+    """清除所有代理环境变量（Tushare 直连不走代理）。"""
+    for key in (
+        "http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY",
+        "all_proxy", "ALL_PROXY",
+        "socks_proxy", "SOCKS_PROXY",
+    ):
         os.environ.pop(key, None)
 
 

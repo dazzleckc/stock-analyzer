@@ -86,41 +86,71 @@ def _failed_dep(name: str, results: dict, full: bool) -> str | None:
 
 
 def run_one(name: str, args: list[str], full: bool) -> ScriptResult:
-    """通过 subprocess 运行单个 sync_*.py，返回 ScriptResult。成功/失败/超时/异常均在此处理。"""
+    """通过 subprocess 运行单个 sync_*.py，返回 ScriptResult。
+
+    流式输出：每行 stdout/stderr 实时打印到父进程 stdout，确保 nohup 日志即时可见。
+    成功/失败/超时/异常均在此处理。
+    """
     r = ScriptResult(name)
     cmd = [sys.executable, str(SCRIPTS_DIR / f"{name}.py")] + args
     # sync_kline 即使增量模式也需逐只轮询 5k+ 股票（~20-30分钟），单独给更长超时
     per_script_timeout = {"sync_kline": 3600}
     timeout = per_script_timeout.get(name, 7200 if full else 600)
 
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n{'─' * 60}\n>>> [{name}] {ts} 开始执行\n    cmd: {' '.join(cmd)}\n{'─' * 60}", flush=True)
+
     try:
         t0 = time.perf_counter()
-        proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True,
-                              text=True, timeout=timeout)
+        proc = subprocess.Popen(
+            cmd, cwd=str(PROJECT_ROOT),
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+
+        stdout_lines: list[str] = []
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            print(line, end="", flush=True)
+            stdout_lines.append(line)
+
+        proc.wait(timeout=timeout)
         r.elapsed = time.perf_counter() - t0
         r.exit_code = proc.returncode
-        r.stdout = proc.stdout
+        r.stdout = "".join(stdout_lines)
 
         if proc.returncode == 0:
             r.status = "success"
-            for line in reversed(proc.stdout.strip().splitlines()):
+            for line in reversed(stdout_lines):
                 s = line.strip()
                 if s.startswith("完成"):
                     r.last_line = s[:80]
                     break
-            if not r.last_line and proc.stdout.strip():
-                r.last_line = proc.stdout.strip().splitlines()[-1].strip()[:80]
+            if not r.last_line and stdout_lines:
+                r.last_line = stdout_lines[-1].strip()[:80]
         else:
             r.status = "failed"
-            stderr = proc.stderr.strip()
-            r.last_line = stderr.splitlines()[-1].strip()[:80] if stderr else f"exit_code={proc.returncode}"
+            r.last_line = next(
+                (l.strip()[:80] for l in reversed(stdout_lines) if l.strip()),
+                f"exit_code={proc.returncode}",
+            )
+
+        ts_end = time.strftime("%Y-%m-%d %H:%M:%S")
+        print(f"\n<<< [{name}] {ts_end} "
+              f"{'✓ 成功' if r.status == 'success' else '✗ 失败'} "
+              f"| 耗时 {r.elapsed:.1f}s | exit {r.exit_code} | "
+              f"{r.last_line}", flush=True)
     except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
         r.elapsed, r.status, r.last_line = timeout, "failed", f"超时（>{timeout}s）"
+        print(f"\n<<< [{name}] ✗ 超时（>{timeout}s）", flush=True)
     except KeyboardInterrupt:
         print("\n[runner] 收到中断信号", file=sys.stderr)
         raise
     except Exception as e:
         r.status, r.last_line = "failed", f"{type(e).__name__}: {e}"[:80]
+        print(f"\n<<< [{name}] ✗ 异常: {e}", flush=True)
 
     return r
 
@@ -166,6 +196,12 @@ def main() -> None:
 
     args_ns = parse_args()
     full, date_val = args_ns.full, args_ns.date
+    mode_str = "全量初始化" if full else f"增量更新 (date={date_val or '今天'})"
+    ts = time.strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{'=' * 60}")
+    print(f"  sync_runner 启动 | 模式: {mode_str} | {ts}")
+    print(f"  Python: {sys.executable}")
+    print(f"{'=' * 60}", flush=True)
     results: dict[str, ScriptResult] = {}
 
     for name in TOPOLOGY_ORDER:
@@ -174,11 +210,11 @@ def main() -> None:
             r = ScriptResult(name)
             r.skip_reason = f"依赖 {dep} 失败，自动跳过"
             results[name] = r
+            ts = time.strftime("%Y-%m-%d %H:%M:%S")
+            print(f"  · [{name}] {ts} 跳过 — {r.skip_reason}", flush=True)
             continue
 
         r = run_one(name, _build_args(name, full, date_val), full)
-        if r.stdout:
-            print(r.stdout, end="")
         results[name] = r
 
     print_summary(results, full)
