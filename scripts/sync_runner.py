@@ -19,7 +19,7 @@ SCRIPTS_DIR = PROJECT_ROOT / "scripts"
 # 常量
 # ═══════════════════════════════════════════════════════════════════
 
-TOPOLOGY_ORDER = ["sync_stocks", "sync_st", "sync_indices", "sync_kline", "sync_delist"]
+TOPOLOGY_ORDER = ["sync_trade_cal", "sync_stocks", "sync_st", "sync_indices", "sync_kline", "sync_delist"]
 # sync_kline 始终依赖 sync_stocks；sync_delist 仅 --full 依赖 sync_st
 DEPENDENCIES = {"sync_kline": ["sync_stocks"], "sync_delist": ["sync_st"]}
 

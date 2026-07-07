@@ -45,15 +45,18 @@ stock-analyzer/
 │   ├── kline_daily.parquet         # 日线数据
 │   ├── indices.parquet             # 主要指数日线（7 指数 + 全市场）
 │   ├── st_stock.parquet            # ST 风险警示板数据
-│   └── delist_period.parquet       # 退市整理期记录
+│   ├── delist_period.parquet       # 退市整理期记录
+│   ├── trade_cal.parquet           # 交易日历（SSE 交易所，1990~2026 年）
+│   └── indicators.parquet          # 市场日频指标（TOP20占比/涨跌幅≥7%/净新高）
 ├── scripts/
+│   ├── sync_runner.py              # 统一入口，自动处理依赖顺序
+│   ├── sync_trade_cal.py           # 交易日历同步（Tushare trade_cal）
 │   ├── sync_stocks.py              # 股票列表同步（Tushare stock_basic）
 │   ├── sync_kline.py               # 日K数据同步（Tushare pro_bar）
 │   ├── sync_indices.py             # 指数数据同步（Tushare pro_bar）
 │   ├── sync_st.py                  # ST 状态数据同步（Tushare stock_st）
 │   ├── sync_delist.py              # 退市整理期数据同步（Tushare st）
-│   ├── sync_runner.py              # 统一入口，自动处理依赖顺序
-│   ├── indicators.py               # 技术指标计算（MA/RSI/波动率/新高新低等）
+│   ├── indicators.py               # 市场指标计算（TOP20成交额占比/极值/净新高）
 │   ├── screener.py                 # 个股筛选器（基于 K 线条件 + 行业 + 基本面）
 │   └── market_thermometer.py       # 市场温度计分析模块
 ├── templates/
@@ -84,6 +87,7 @@ stock-analyzer/
 | `stock_basic` | 全市场股票列表 + 退市日期过滤 | `sync_stocks.py` |
 | `stock_st` | ST 风险警示板每日标记 | `sync_st.py` |
 | `st` | 风险警示生命周期事件（含退市整理期） | `sync_delist.py` |
+| `trade_cal` | 交易日历（SSE 交易所） | `sync_trade_cal.py` |
 
 Tushare Token 需要 ≥ 120 积分（日线接口权限），6000 积分可获得 ST 数据。
 
@@ -142,12 +146,13 @@ tqdm>=4.60.0
 python scripts/sync_runner.py --full
 ```
 
-等价于按依赖顺序依次执行 5 个 `sync_*.py`：
-1. `sync_stocks.py --full` — 股票列表 + 变更日志
-2. `sync_st.py --full` — ST 风险警示数据
-3. `sync_indices.py --full` — 指数日线
-4. `sync_kline.py --full` — 个股日K（依赖步骤1）
-5. `sync_delist.py --full` — 退市整理期（依赖步骤2）
+等价于按依赖顺序依次执行 6 个 `sync_*.py`：
+1. `sync_trade_cal.py --full` — 交易日历
+2. `sync_stocks.py --full` — 股票列表 + 变更日志
+3. `sync_st.py --full` — ST 风险警示数据
+4. `sync_indices.py --full` — 指数日线
+5. `sync_kline.py --full` — 个股日K（依赖步骤2）
+6. `sync_delist.py --full` — 退市整理期（依赖步骤3）
 
 任一脚本失败时，依赖它的下游脚本自动跳过，最后打印汇总表。
 
@@ -161,16 +166,40 @@ python scripts/sync_runner.py
 python scripts/sync_runner.py --date 20260701
 ```
 
-自动按依赖顺序执行 5 个 `sync_*.py` 的增量模式。
+自动按依赖顺序执行 6 个 `sync_*.py` 的增量模式。
 
 ### 统一入口说明
 
 `sync_runner.py` 封装了数据同步的完整流程：
 
-- **自动依赖排序**：先 Layer 1（stocks / ST / indices），再 Layer 2（kline / delist）
+- **自动依赖排序**：先 Layer 1（trade_cal / stocks / ST / indices），再 Layer 2（kline / delist）
 - **失败隔离**：Layer 1 某脚本失败 → 对应 Layer 2 跳过，其他不受影响
 - **汇总报告**：每个脚本的状态、耗时和结果一目了然
 - **退出码**：全部成功返回 0，任一失败返回 1，可在 CI / cron 中使用
+
+### 交易日历同步
+
+```bash
+# 全量拉取交易日历（首次运行，独立无依赖）
+python scripts/sync_trade_cal.py --full
+
+# 同效果（默认即全量）
+python scripts/sync_trade_cal.py
+```
+
+交易日历由 `sync_runner.py` 自动排在拓扑第 0 位执行，无需单独运行。
+
+### 市场指标计算
+
+```bash
+# 全量计算所有指标（首次运行）
+python scripts/indicators.py --full
+
+# 增量更新（每日运行，只补缺失日）
+python scripts/indicators.py
+```
+
+输出写入 `data/indicators.parquet`，共 6 列 5 指标，用于温度计因子计算。
 
 ### 使用示例
 
@@ -235,27 +264,123 @@ clean = kline.filter(~pl.col("code").is_in(st_codes))
 
 ## 数据字段说明
 
-### kline_daily.parquet
-
-| 字段 | 类型 | 单位 | 说明 |
-|------|------|------|------|
-| code | str | — | 6 位股票代码 |
-| trade_date | date | — | 交易日 |
-| open / high / low / close | f64 | 元 | OHLC 价格（前复权） |
-| volume | i64 | 手 | 成交量 |
-| amount | f64 | 千元 | 成交额 |
-| amplitude | f64 | % | 振幅 = (high-low)/pre_close×100 |
-| pct_change | f64 | % | 涨跌幅 |
-| turnover_rate | f64 | % | 换手率 |
-
-### stocks.parquet
+### stocks.parquet — 全市场股票列表
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| code | str | 6 位股票代码 |
-| name | str | 股票名称 |
-| list_status | str | 上市状态（L=上市, D=退市, P=暂停上市） |
-| delist_date | str | 退市日期（上市中为 null） |
+| code | `Utf8` | 6 位股票代码 |
+| name | `Utf8` | 股票名称 |
+| list_status | `Utf8` | 上市状态：`L`=上市, `D`=退市, `P`=暂停上市 |
+| delist_date | `Utf8` | 退市日期（上市中为 `null`） |
+
+> **数据源**: Tushare `stock_basic`（L+D+P），过滤 D 类中 delist_date ≤ 2026-01-05 的记录。
+
+### stocks_changelog.parquet — 股票变更日志
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| code | `Utf8` | 6 位股票代码 |
+| field | `Utf8` | 变更字段：`name`/`list_status`/`delist_date`/`_new_`（新增）/`_removed_`（移除）|
+| old_value | `Utf8` | 变更前值（可为 null）|
+| new_value | `Utf8` | 变更后值（可为 null）|
+| detected_at | `Datetime` | 检测时间戳 |
+
+### kline_daily.parquet — 个股日K线
+
+| 字段 | 类型 | 单位 | 说明 |
+|------|------|------|------|
+| code | `Utf8` | — | 6 位股票代码 |
+| trade_date | `Date` | — | 交易日 |
+| open | `Float64` | 元 | 开盘价（前复权） |
+| high | `Float64` | 元 | 最高价（前复权） |
+| low | `Float64` | 元 | 最低价（前复权） |
+| close | `Float64` | 元 | 收盘价（前复权） |
+| volume | `Int64` | 手 | 成交量 |
+| amount | `Float64` | 千元 | 成交额 |
+| amplitude | `Float64` | % | 振幅 = (high - low) / pre_close × 100 |
+| pct_change | `Float64` | % | 涨跌幅 |
+| turnover_rate | `Float64` | % | 换手率 |
+
+> **数据源**: Tushare `pro_bar(asset='E')`，起始日期 2026-01-05。
+> **非空约束**: `code`、`trade_date`、`close` 不允许为空。
+
+### indices.parquet — 指数日线
+
+| 字段 | 类型 | 单位 | 说明 |
+|------|------|------|------|
+| code | `Utf8` | — | 指数代码（含 `999999` 全市场汇总） |
+| trade_date | `Date` | — | 交易日 |
+| open | `Float64` | 点 | 开盘点位 |
+| high | `Float64` | 点 | 最高点位 |
+| low | `Float64` | 点 | 最低点位 |
+| close | `Float64` | 点 | 收盘点位 |
+| volume | `Int64` | 手 | 成交量 |
+| amount | `Float64` | 千元 | 成交额 |
+| amplitude | `Float64` | % | 振幅 |
+| pct_change | `Float64` | % | 涨跌幅 |
+| turnover_rate | `Float64` | % | 换手率 |
+
+跟踪的 6 只指数：
+
+| 指数代码 | 名称 |
+|---------|------|
+| `000001.SH` | 上证指数 |
+| `399001.SZ` | 深证成指 |
+| `399006.SZ` | 创业板指 |
+| `000688.SH` | 科创50 |
+| `000300.SH` | 沪深300 |
+| `899050.BJ` | 北证50 |
+
+附加 `code=999999` 的全市场汇总行（字段含义同指数日线）。
+
+> **数据源**: Tushare `pro_bar(asset='I')`，起始日期 2026-01-05。
+
+### st_stock.parquet — ST 风险警示数据
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| code | `Utf8` | 6 位股票代码 |
+| name | `Utf8` | 股票名称 |
+| exchange | `Utf8` | 交易所代码 |
+| trade_date | `Date` | 交易日 |
+| type | `Utf8` | ST 类型编码 |
+| type_name | `Utf8` | ST 类型说明（如 ST、*ST）|
+
+> **数据源**: Tushare `stock_st`，覆盖 2026-01-01 至今。
+
+### delist_period.parquet — 退市整理期记录
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| code | `Utf8` | 6 位股票代码 |
+| name | `Utf8` | 股票名称 |
+| imp_date | `Date` | 整理期起始日期 |
+
+> **数据源**: Tushare `st`（筛选 `st_type="退市整理期"`），两阶段获取：先按时间窗口扫描，再逐只个股补全。
+
+### trade_cal.parquet — 交易日历
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| exchange | `Utf8` | 交易所代码（SSE） |
+| cal_date | `Date` | 日历日期 |
+| is_open | `Int8` | 是否交易日：1=交易日，0=休市 |
+| pretrade_date | `Date` | 前一个交易日 |
+
+> **数据源**: Tushare `trade_cal(exchange="SSE")`，覆盖 1990-12-19 ~ 2026-12-31 全量日历，共 8,797 个交易日。
+
+### indicators.parquet — 市场日频指标
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| trade_date | `Date` | 交易日 |
+| top20_amount_ratio | `Float64` | TOP20 成交额占比（%）|
+| up_ge7_count | `Int64` | 涨跌幅 ≥ 7% 的股票数 |
+| down_le7_count | `Int64` | 涨跌幅 ≤ -7% 的股票数 |
+| net_high_20d | `Int64` | 20 日净新高数（新高 - 新低）|
+| net_high_60d | `Int64` | 60 日净新高数（新高 - 新低）|
+
+> **数据源**: 基于 `kline_daily.parquet` + `st_stock.parquet` + `delist_period.parquet` 计算，排除当日 ST 及退市整理期股票。全量计算通过 `scripts/indicators.py --full`，增量更新通过 `scripts/indicators.py`。
 
 ## 市场温度计指标说明
 
@@ -305,6 +430,8 @@ clean = kline.filter(~pl.col("code").is_in(st_codes))
 - [x] 指数 + 全市场汇总
 - [x] ST 风险警示板数据
 - [x] 退市整理期数据
+- [x] 交易日历数据接入
+- [x] 技术指标计算管线（TOP20成交额占比 / 涨跌幅≥7% / 净新高）
 - [ ] 完整温度计因子计算
 - [ ] 行业分赛道温度（科技 / 消费 / 制造等）
 - [ ] 个股筛选器（K 线条件 + 行业 + 基本面）

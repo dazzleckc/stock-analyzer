@@ -113,3 +113,35 @@ INDICES_SCHEMA = {
 }
 
 INDICES_REQUIRED_NONNULL = ["code", "trade_date", "close"]
+
+# ── indicators.parquet schema ───────────────────
+INDICATORS_PATH = os.path.join(DATA_DIR, "indicators.parquet")
+
+INDICATORS_COLUMNS = [
+    "trade_date",
+    "top20_amount_ratio",
+    "up_ge7_count",
+    "down_le7_count",
+    "net_high_20d",
+    "net_high_60d",
+]
+
+INDICATORS_SCHEMA = {
+    "trade_date": pl.Date,
+    "top20_amount_ratio": pl.Float64,
+    "up_ge7_count": pl.Int64,
+    "down_le7_count": pl.Int64,
+    "net_high_20d": pl.Int64,
+    "net_high_60d": pl.Int64,
+}
+
+# ── trade_cal.parquet schema ────────────────────
+TRADE_CAL_PATH = os.path.join(DATA_DIR, "trade_cal.parquet")
+
+TRADE_CAL_COLUMNS = ["exchange", "cal_date", "is_open", "pretrade_date"]
+TRADE_CAL_SCHEMA = {
+    "exchange": pl.Utf8,
+    "cal_date": pl.Date,
+    "is_open": pl.Int8,
+    "pretrade_date": pl.Date,
+}
