@@ -359,7 +359,7 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
     stop_event = threading.Event()
     reporter = threading.Thread(
         target=_progress_reporter,
-        args=(total, progress_counter, stop_event, 5.0),
+        args=(total, progress_counter, stop_event, 30.0),
         daemon=True,
     )
     reporter.start()
