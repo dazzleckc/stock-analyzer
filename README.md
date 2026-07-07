@@ -283,7 +283,7 @@ clean = kline.filter(~pl.col("code").is_in(st_codes))
 | field | `Utf8` | 变更字段：`name`/`list_status`/`delist_date`/`_new_`（新增）/`_removed_`（移除）|
 | old_value | `Utf8` | 变更前值（可为 null）|
 | new_value | `Utf8` | 变更后值（可为 null）|
-| detected_at | `Datetime` | 检测时间戳 |
+| detected_at | `Date` | 检测日期 |
 
 ### kline_daily.parquet — 个股日K线
 
@@ -367,7 +367,7 @@ clean = kline.filter(~pl.col("code").is_in(st_codes))
 | is_open | `Int8` | 是否交易日：1=交易日，0=休市 |
 | pretrade_date | `Date` | 前一个交易日 |
 
-> **数据源**: Tushare `trade_cal(exchange="SSE")`，覆盖 1990-12-19 ~ 2026-12-31 全量日历，共 8,797 个交易日。
+> **数据源**: Tushare `trade_cal(exchange="SSE")`，保留 `TRADE_CAL_START_DATE`（2026-01-01）之后的日历记录。
 
 ### indicators.parquet — 市场日频指标
 

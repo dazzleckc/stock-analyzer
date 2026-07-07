@@ -13,12 +13,13 @@
 import argparse
 import os
 import sys
+from datetime import date
 
 import polars as pl
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 from config import (                              # noqa: E402
-    TRADE_CAL_PATH, TRADE_CAL_COLUMNS,
+    TRADE_CAL_PATH, TRADE_CAL_COLUMNS, TRADE_CAL_START_DATE,
     get_pro, atomic_write_parquet,
 )
 
@@ -66,6 +67,23 @@ def sync() -> dict:
 
     # 选择列 & 排序
     df = df.select(TRADE_CAL_COLUMNS).sort("cal_date")
+
+    # 校验 TRADE_CAL_START_DATE 格式
+    assert len(TRADE_CAL_START_DATE) == 8 and TRADE_CAL_START_DATE.isdigit(), \
+        f"TRADE_CAL_START_DATE 必须为 8 位 YYYYMMDD 格式，当前: {TRADE_CAL_START_DATE!r}"
+
+    # 过滤：只保留 TRADE_CAL_START_DATE 之后的数据
+    start = date(
+        int(TRADE_CAL_START_DATE[:4]),
+        int(TRADE_CAL_START_DATE[4:6]),
+        int(TRADE_CAL_START_DATE[6:8]),
+    )
+    df = df.filter(pl.col("cal_date") >= start)
+
+    # 空结果保护：filter 后无数据则跳过写入，保留现有文件
+    if df.is_empty():
+        print("  ⚠ filter 后无数据，跳过写入，保留现有文件")
+        return {"rows": 0, "date_min": None, "date_max": None, "trading_days": 0}
 
     # 原子写入
     atomic_write_parquet(df, TRADE_CAL_PATH)

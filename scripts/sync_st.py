@@ -22,7 +22,7 @@ from config import (                              # noqa: E402
     ST_STOCK_PATH, ST_COLUMNS,
     get_pro, ymd_to_dashed,
     truncate_and_insert, atomic_write_parquet,
-    validate_no_null, validate_unique,
+    validate_no_null, validate_unique, TRADE_CAL_START_DATE,
 )
 
 
@@ -88,7 +88,13 @@ def sync_full() -> dict:
     返回: {"days": int, "rows": int}
     """
     pro = get_pro()
-    start_dt = date(2026, 1, 1)
+    assert len(TRADE_CAL_START_DATE) == 8 and TRADE_CAL_START_DATE.isdigit(), \
+        f"TRADE_CAL_START_DATE 必须为 8 位 YYYYMMDD 格式，当前: {TRADE_CAL_START_DATE!r}"
+    start_dt = date(
+        int(TRADE_CAL_START_DATE[:4]),
+        int(TRADE_CAL_START_DATE[4:6]),
+        int(TRADE_CAL_START_DATE[6:8]),
+    )
     end_dt = date.today()
 
     print(f"全量初始化 ST 数据（{start_dt} ~ {end_dt}）")

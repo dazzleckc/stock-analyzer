@@ -23,6 +23,7 @@ DELIST_PATH           = os.path.join(DATA_DIR, "delist_period.parquet")
 # ── 日期常量 ──────────────────────────────────────
 CUTOFF_DATE = "20260105"           # stocks 过滤退市股的截止日期
 KLINE_START_DATE = "20260105"      # kline 全量拉取起始日
+TRADE_CAL_START_DATE = "20260101"  # 交易日历保留起始日（含）
 
 # ── stocks.parquet schema ─────────────────────────
 STOCKS_COLUMNS = ["code", "name", "list_status", "delist_date"]
@@ -40,7 +41,7 @@ CHANGELOG_SCHEMA = {
     "field": pl.Utf8,               # name / list_status / delist_date / _new_ / _removed_
     "old_value": pl.Utf8,           # 可为 null
     "new_value": pl.Utf8,           # 可为 null
-    "detected_at": pl.Datetime,     # 检测时间
+    "detected_at": pl.Date,         # 检测日期
 }
 
 # ── kline_daily.parquet schema ────────────────────

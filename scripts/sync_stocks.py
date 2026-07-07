@@ -115,7 +115,7 @@ def generate_changelog(old: pl.DataFrame, new: pl.DataFrame) -> pl.DataFrame:
     old_map = {r[0]: r for r in old.iter_rows()}
     new_map = {r[0]: r for r in new.iter_rows()}
     col_names = old.columns
-    detected_at = datetime.now()
+    detected_at = datetime.now().date()
     rows = []
 
     # 新增
@@ -155,6 +155,11 @@ def append_changelog(changelog_df: pl.DataFrame) -> None:
 
     if os.path.exists(STOCKS_CHANGELOG_PATH):
         existing = pl.read_parquet(STOCKS_CHANGELOG_PATH)
+        # 向后兼容：旧文件 detected_at 可能为 Datetime 或 Utf8
+        if existing.schema["detected_at"] != pl.Date:
+            existing = existing.with_columns(
+                pl.col("detected_at").cast(pl.Date)
+            )
         changelog_df = pl.concat([existing, changelog_df], how="vertical")
 
     atomic_write_parquet(changelog_df, STOCKS_CHANGELOG_PATH)

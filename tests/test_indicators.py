@@ -511,17 +511,35 @@ def test_indicators_data_quality():
 # 补充验证：_find_missing_dates
 # ═══════════════════════════════════════════════════════════════════
 
-def test_find_missing_dates_none_missing():
-    """无缺失日期时，使用文件不存在路径应返回所有交易日。"""
-    # 注意：_find_missing_dates 中存在一个死代码 bug（l.152-157），
-    # 当文件存在时会触发 TypeError: unhashable type: 'Series'。
-    # 因此这里用不存在的路径测试 else 分支。
+def test_find_missing_dates_file_not_exist():
+    """文件不存在时，应返回所有交易日（else 分支）。"""
     missing = _find_missing_dates(TRADE_CAL_PATH, "/tmp/nonexistent_test.parquet")
     assert isinstance(missing, list)
     assert len(missing) > 0, "文件不存在时应返回所有交易日"
 
 
-def test_find_missing_dates_temp_file():
-    """不存在的文件应返回所有交易日。"""
-    missing = _find_missing_dates(TRADE_CAL_PATH, "/tmp/nonexistent.parquet")
-    assert len(missing) > 0, "文件不存在时应返回所有交易日"
+def test_find_missing_dates_file_exists():
+    """文件存在时，应返回缺失的交易日列表（if 分支）。"""
+    import tempfile, os
+
+    # 构造临时 parquet（只保留 indicators 中前 5 个日期）
+    df = pl.read_parquet(INDICATORS_PATH)
+    kept_dates = df.head(5)["trade_date"].to_list()
+    df_partial = df.head(5)
+    tmp_fd, tmp_path = tempfile.mkstemp(suffix=".parquet")
+    os.close(tmp_fd)
+    try:
+        df_partial.write_parquet(tmp_path)
+        missing = _find_missing_dates(TRADE_CAL_PATH, tmp_path)
+        assert isinstance(missing, list), "应返回列表"
+        # 缺失列表中不应包含已保留的日期
+        for d in kept_dates:
+            assert d not in missing, f"缺失列表不应包含已保留日期 {d}"
+        # 缺失列表应包含 indicators 中其他日期的绝大多数
+        other_dates = df.tail(-5)["trade_date"].to_list()
+        count_in_missing = sum(1 for d in other_dates if d in missing)
+        assert count_in_missing > len(other_dates) * 0.8, \
+            f"缺失列表应包含至少 80% 的其他日期，实际 {count_in_missing}/{len(other_dates)}"
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)

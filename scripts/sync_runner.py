@@ -89,7 +89,9 @@ def run_one(name: str, args: list[str], full: bool) -> ScriptResult:
     """通过 subprocess 运行单个 sync_*.py，返回 ScriptResult。成功/失败/超时/异常均在此处理。"""
     r = ScriptResult(name)
     cmd = [sys.executable, str(SCRIPTS_DIR / f"{name}.py")] + args
-    timeout = 7200 if full else 600
+    # sync_kline 即使增量模式也需逐只轮询 5k+ 股票（~20-30分钟），单独给更长超时
+    per_script_timeout = {"sync_kline": 3600}
+    timeout = per_script_timeout.get(name, 7200 if full else 600)
 
     try:
         t0 = time.perf_counter()

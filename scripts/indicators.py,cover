@@ -1,0 +1,342 @@
+> """市场指标日频计算脚本。
+  
+> 计算以下 5 个日频市场指标，写入 indicators.parquet：
+>   - top20_amount_ratio    TOP20 成交额占比
+>   - up_ge7_count          涨跌幅 >= 7% 的股票数
+>   - down_le7_count        涨跌幅 <= -7% 的股票数
+>   - net_high_20d          20 日净新高（新高 - 新低）
+>   - net_high_60d          60 日净新高（新高 - 新低）
+  
+> 使用方式：
+>   python scripts/indicators.py              # 增量（缺哪日算哪日）
+>   python scripts/indicators.py --full        # 全量重算
+> """
+  
+> import argparse
+> import datetime
+> import os
+> import sys
+  
+> import polars as pl
+  
+> sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+> from config import (                              # noqa: E402
+>     TRADE_CAL_PATH, KLINE_PATH, ST_STOCK_PATH, DELIST_PATH,
+>     INDICATORS_PATH, INDICATORS_SCHEMA,
+>     atomic_write_parquet,
+> )
+  
+  
+  # ═══════════════════════════════════════════════════════════════════
+  # Rolling 预计算
+  # ═══════════════════════════════════════════════════════════════════
+  
+> def _precompute_rolling(kline: pl.DataFrame) -> pl.DataFrame:
+>     """预计算每只股票的 rolling_max(high) 和 rolling_min(low)，20d+60d。
+  
+>     步骤：
+>     1. kline 按 code, trade_date 排序
+>     2. 对每只股票计算 rolling 列
+>     3. 返回附加了 rolling 列的 DataFrame
+>     """
+>     kline = kline.sort(["code", "trade_date"])
+>     kline = kline.with_columns([
+>         pl.col("high").rolling_max(window_size=20, min_samples=1).over("code").alias("rolling_high_20d"),
+>         pl.col("high").rolling_max(window_size=60, min_samples=1).over("code").alias("rolling_high_60d"),
+>         pl.col("low").rolling_min(window_size=20, min_samples=1).over("code").alias("rolling_low_20d"),
+>         pl.col("low").rolling_min(window_size=60, min_samples=1).over("code").alias("rolling_low_60d"),
+>     ])
+>     return kline
+  
+  
+  # ═══════════════════════════════════════════════════════════════════
+  # 单日指标计算
+  # ═══════════════════════════════════════════════════════════════════
+  
+> def calc_single_day(
+>     d: datetime.date,
+>     kline_all: pl.DataFrame,
+>     st_all: pl.DataFrame,
+>     delist_all: pl.DataFrame,
+>     kline_with_rolling: pl.DataFrame,
+>     trade_date_index_map: dict,
+> ) -> dict | None:
+>     """计算单个交易日所有指标。
+  
+>     8 步计算流程：
+>     1. 取当日 kline 数据
+>     2. 获取当日 ST 代码
+>     3. 获取退市整理期代码（imp_date <= d）
+>     4. 合并排除列表
+>     5. 过滤排除代码
+>     6. TOP20 成交额占比
+>     7. 涨跌幅计数（>=7% / <=-7%）
+>     8. 净新高计数（使用预计算 rolling 值）
+>     """
+      # 1. 取当日数据（用 kline_with_rolling，含 rolling 列）
+>     kline_today = kline_with_rolling.filter(pl.col("trade_date") == d)
+>     if kline_today.is_empty():
+>         return None
+  
+      # 2. 当日 ST 代码
+>     st_codes_today = st_all.filter(pl.col("trade_date") == d)["code"].unique()
+  
+      # 3. 退市整理期代码
+>     delist_codes = delist_all.filter(pl.col("imp_date") <= d)["code"].unique()
+  
+      # 4. 合并排除列表
+>     exclude = list(set(st_codes_today.to_list()) | set(delist_codes.to_list()))
+  
+      # 5. 过滤
+>     filtered = kline_today.filter(~pl.col("code").is_in(exclude))
+>     if filtered.is_empty():
+>         return None
+  
+      # 6. TOP20 成交额占比
+>     total = filtered["amount"].sum()
+>     if total > 0:
+>         top20 = filtered.sort("amount", descending=True).head(20)["amount"].sum()
+>         ratio = top20 / total * 100
+!     else:
+!         ratio = 0.0
+  
+      # 7. 涨跌幅计数
+>     up = filtered.filter(pl.col("pct_change") >= 7.0).height
+>     down = filtered.filter(pl.col("pct_change") <= -7.0).height
+  
+      # 8. 净新高
+>     idx = trade_date_index_map[d]
+  
+>     if idx >= 19:
+>         high_20 = filtered.filter(pl.col("high") >= pl.col("rolling_high_20d")).height
+>         low_20 = filtered.filter(pl.col("low") <= pl.col("rolling_low_20d")).height
+>         net_20 = high_20 - low_20
+>     else:
+>         net_20 = None
+  
+>     if idx >= 59:
+>         high_60 = filtered.filter(pl.col("high") >= pl.col("rolling_high_60d")).height
+>         low_60 = filtered.filter(pl.col("low") <= pl.col("rolling_low_60d")).height
+>         net_60 = high_60 - low_60
+>     else:
+>         net_60 = None
+  
+>     return {
+>         "trade_date": d,
+>         "top20_amount_ratio": ratio,
+>         "up_ge7_count": up,
+>         "down_le7_count": down,
+>         "net_high_20d": net_20,
+>         "net_high_60d": net_60,
+>     }
+  
+  
+  # ═══════════════════════════════════════════════════════════════════
+  # 缺失日期发现（增量模式）
+  # ═══════════════════════════════════════════════════════════════════
+  
+> def _find_missing_dates(trade_cal_path: str, existing_path: str) -> list[datetime.date]:
+>     """发现缺失的交易日列表（用于增量模式）。
+  
+>     比较 trade_cal 中所有交易日与已存在的 indicators 日期，
+>     返回缺失日期列表（已排序）。
+>     """
+>     cal = pl.read_parquet(trade_cal_path)
+>     trading_days = (
+>         cal.filter(pl.col("is_open") == 1)
+>         .sort("cal_date")["cal_date"]
+>         .to_list()
+>     )
+  
+>     if os.path.exists(existing_path):
+!         existing_dates = set(
+!             pl.read_parquet(existing_path, n_rows=0)  # 只读 schema
+!             .with_columns(pl.lit(None).alias("_"))
+!             .select(pl.lit(None).cast(pl.Date).alias("d"))
+!             .limit(0)
+!         )
+          # 读已有日期（仅 trade_date 列）
+!         existing = pl.read_parquet(existing_path, columns=["trade_date"])
+!         existing_dates = set(existing["trade_date"].to_list())
+>     else:
+>         existing_dates = set()
+  
+>     missing = [d for d in trading_days if d not in existing_dates]
+>     return missing
+  
+  
+  # ═══════════════════════════════════════════════════════════════════
+  # 全量重算
+  # ═══════════════════════════════════════════════════════════════════
+  
+> def calc_full() -> dict:
+>     """全量重算：遍历交易日历 → 逐日计算 → 原子覆盖写入。
+  
+>     返回: {"dates": int, "rows": int}
+>     """
+>     print("全量计算市场指标...")
+  
+      # 读 kline（只读需要的列）
+>     print(f"  读 kline_daily.parquet ...")
+>     kline = pl.read_parquet(KLINE_PATH, columns=[
+>         "code", "trade_date", "high", "low", "amount", "pct_change",
+>     ])
+>     kline_min = kline["trade_date"].min()
+>     kline_max = kline["trade_date"].max()
+>     print(f"  kline 日期范围：{kline_min} ~ {kline_max}")
+  
+      # 读交易日历，限缩到 kline 覆盖的范围
+>     cal = pl.read_parquet(TRADE_CAL_PATH)
+>     trading_days = (
+>         cal.filter(pl.col("is_open") == 1)
+>         .filter(pl.col("cal_date").is_between(kline_min, kline_max))
+>         .sort("cal_date")["cal_date"]
+>         .to_list()
+>     )
+>     print(f"  交易日历（限缩）：{len(trading_days)} 个交易日")
+  
+      # 读 ST 数据
+>     st = pl.read_parquet(ST_STOCK_PATH, columns=["code", "trade_date"])
+  
+      # 读退市整理期数据
+>     delist = pl.read_parquet(DELIST_PATH, columns=["code", "imp_date"])
+  
+      # 预计算 rolling
+>     print(f"  预计算 rolling 指标...")
+>     kline_with_rolling = _precompute_rolling(kline)
+  
+      # 构建日期索引映射
+>     date_index_map = {d: i for i, d in enumerate(trading_days)}
+  
+      # 逐日计算
+>     records: list[dict] = []
+>     total = len(trading_days)
+>     for i, d in enumerate(trading_days):
+>         if (i + 1) % 20 == 0 or i == 0:
+>             print(f"  进度: {i + 1}/{total}（已产出 {len(records)} 行）")
+>         result = calc_single_day(d, kline, st, delist, kline_with_rolling, date_index_map)
+>         if result is not None:
+>             records.append(result)
+  
+>     if not records:
+!         print("  无有效交易日数据")
+!         empty_df = pl.DataFrame(schema=INDICATORS_SCHEMA)
+!         atomic_write_parquet(empty_df, INDICATORS_PATH)
+!         return {"dates": 0, "rows": 0}
+  
+>     df = pl.DataFrame(records, schema=INDICATORS_SCHEMA, orient="row")
+>     atomic_write_parquet(df, INDICATORS_PATH)
+  
+>     print(f"  → {len(df)} 行（{df['trade_date'].n_unique()} 个交易日）已保存到 {INDICATORS_PATH}")
+  
+>     return {"dates": df["trade_date"].n_unique(), "rows": len(df)}
+  
+  
+  # ═══════════════════════════════════════════════════════════════════
+  # 增量计算
+  # ═══════════════════════════════════════════════════════════════════
+  
+> def calc_incremental() -> dict:
+>     """增量计算：读已有 → 找缺失日 → 只算新日 → 合并写入。
+  
+>     返回: {"dates": int, "rows": int, "new_dates": int}
+>     """
+>     if not os.path.exists(INDICATORS_PATH):
+!         print("⚠ 无本地 indicators.parquet，切换为全量模式")
+!         return calc_full()
+  
+      # 读 kline（只读需要的列）
+>     kline = pl.read_parquet(KLINE_PATH, columns=[
+>         "code", "trade_date", "high", "low", "amount", "pct_change",
+>     ])
+>     kline_min = kline["trade_date"].min()
+>     kline_max = kline["trade_date"].max()
+  
+      # 读交易日历，限缩到 kline 覆盖的范围
+>     cal = pl.read_parquet(TRADE_CAL_PATH)
+>     all_trading_days = (
+>         cal.filter(pl.col("is_open") == 1)
+>         .filter(pl.col("cal_date").is_between(kline_min, kline_max))
+>         .sort("cal_date")["cal_date"]
+>         .to_list()
+>     )
+  
+      # 读已有日期
+>     existing = pl.read_parquet(INDICATORS_PATH, columns=["trade_date"])
+>     existing_dates = set(existing["trade_date"].to_list())
+  
+      # 差集
+>     missing_dates = [d for d in all_trading_days if d not in existing_dates]
+>     if not missing_dates:
+!         print("无需更新")
+!         return {"dates": 0, "rows": len(existing), "new_dates": 0}
+  
+      # 读 ST 数据
+>     st = pl.read_parquet(ST_STOCK_PATH, columns=["code", "trade_date"])
+  
+      # 读退市整理期数据
+>     delist = pl.read_parquet(DELIST_PATH, columns=["code", "imp_date"])
+  
+      # 预计算 rolling（全量 kline，因为 rolling 依赖历史数据）
+>     kline_with_rolling = _precompute_rolling(kline)
+  
+      # 构建日期索引映射
+>     date_index_map = {d: i for i, d in enumerate(all_trading_days)}
+  
+      # 逐日计算缺失日
+>     records: list[dict] = []
+>     total = len(missing_dates)
+>     for i, d in enumerate(missing_dates):
+>         if (i + 1) % 20 == 0 or i == 0:
+>             print(f"  进度: {i + 1}/{total}")
+>         result = calc_single_day(d, kline, st, delist, kline_with_rolling, date_index_map)
+>         if result is not None:
+>             records.append(result)
+  
+>     if not records:
+!         print("  缺失日无有效数据")
+!         return {"dates": len(existing), "rows": len(existing), "new_dates": 0}
+  
+>     new_df = pl.DataFrame(records, schema=INDICATORS_SCHEMA, orient="row")
+  
+      # 合并：旧 + 新 → sort
+>     old_df = pl.read_parquet(INDICATORS_PATH)
+>     merged = pl.concat([old_df, new_df], how="vertical").sort("trade_date")
+  
+>     atomic_write_parquet(merged, INDICATORS_PATH)
+  
+>     print(f"  → 新增 {len(new_df)} 行，合计 {len(merged)} 行，"
+>           f"已保存到 {INDICATORS_PATH}")
+  
+>     return {
+>         "dates": merged["trade_date"].n_unique(),
+>         "rows": len(merged),
+>         "new_dates": len(new_df),
+>     }
+  
+  
+  # ═══════════════════════════════════════════════════════════════════
+  # CLI
+  # ═══════════════════════════════════════════════════════════════════
+  
+> def main():
+!     parser = argparse.ArgumentParser(
+!         description="市场指标日频计算：TOP20 成交额占比 / 涨跌幅计数 / 净新高"
+!     )
+!     parser.add_argument(
+!         "--full", action="store_true",
+!         help="全量重算（默认增量，仅补缺失日）"
+!     )
+!     args = parser.parse_args()
+  
+!     if args.full:
+!         result = calc_full()
+!     else:
+!         result = calc_incremental()
+  
+!     print(f"\n完成。{result.get('dates', 0)} 天, {result.get('rows', 0)} 行"
+!           + (f"，新增 {result.get('new_dates', 0)} 天" if "new_dates" in result else ""))
+  
+  
+> if __name__ == "__main__":
+!     main()
