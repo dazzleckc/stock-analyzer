@@ -18,6 +18,7 @@ import os
 import shutil
 import sys
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date
 from pathlib import Path
@@ -158,6 +159,7 @@ def _worker_incremental(
     rate_limiter: RateLimiter,
     error_log: list,
     error_lock: threading.Lock,
+    progress_counter: dict,
 ) -> list[pl.DataFrame]:
     """增量 worker：独立 pro_api 实例，原内存收集方案。"""
     pro = get_pro()
@@ -169,10 +171,15 @@ def _worker_incremental(
         except Exception as e:
             with error_lock:
                 error_log.append((code, str(e)))
+            with progress_counter["lock"]:
+                progress_counter["value"] += 1
             continue
 
         if df is not None and len(df) > 0:
             frames.append(df)
+
+        with progress_counter["lock"]:
+            progress_counter["value"] += 1
 
     return frames
 
@@ -220,6 +227,30 @@ def _merge_tmp_files() -> pl.DataFrame:
 
     frames = [pl.read_parquet(str(f)) for f in files]
     return pl.concat(frames, how="vertical")
+
+
+# ═══════════════════════════════════════════════════════════════════
+# 进度报告
+# ═══════════════════════════════════════════════════════════════════
+
+def _progress_reporter(
+    total: int,
+    counter: dict,
+    stop_event: threading.Event,
+    interval: float = 5.0,
+):
+    """后台进度报告线程：每 interval 秒输出一次进度。"""
+    start = time.time()
+    while not stop_event.wait(interval):
+        done = counter["value"]
+        elapsed = time.time() - start
+        rate = done / elapsed if elapsed > 0 else 0
+        remain = (total - done) / rate if rate > 0 else 0
+        print(
+            f"  [{done}/{total}] {elapsed:.0f}s elapsed, "
+            f"{rate:.1f}/s, ~{remain:.0f}s remain",
+            flush=True,
+        )
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -312,15 +343,27 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
         target_date = date.today().strftime("%Y%m%d")
 
     codes = _load_active_codes()
+    total = len(codes)
 
     print(f"增量同步日K（{target_date}）")
-    print(f"  活跃股票 {len(codes)} 只，{max_workers} 线程并发")
+    print(f"  活跃股票 {total} 只，{max_workers} 线程并发")
 
     rate_limiter = RateLimiter(
         max_calls=TUSHARE_RATE_LIMIT, window_seconds=TUSHARE_RATE_WINDOW,
     )
     error_log: list[tuple[str, str]] = []
     error_lock = threading.Lock()
+
+    # 共享进度计数器 + 后台报告线程
+    progress_counter: dict = {"value": 0, "lock": threading.Lock()}
+    stop_event = threading.Event()
+    reporter = threading.Thread(
+        target=_progress_reporter,
+        args=(total, progress_counter, stop_event, 5.0),
+        daemon=True,
+    )
+    reporter.start()
+    start_time = time.time()
 
     chunks = _chunk_list(codes, max_workers)
 
@@ -329,13 +372,19 @@ def sync_incremental(target_date: str = None, max_workers: int = 5) -> dict:
         futures = [
             executor.submit(
                 _worker_incremental, chunk, target_date, target_date,
-                rate_limiter, error_log, error_lock,
+                rate_limiter, error_log, error_lock, progress_counter,
             )
             for chunk in chunks
         ]
 
         for future in as_completed(futures):
             all_frames.extend(future.result())
+
+    # 停止报告线程
+    stop_event.set()
+    reporter.join()
+    elapsed = time.time() - start_time
+    print(f"  [{total}/{total}] {elapsed:.0f}s elapsed — 完成")
 
     if error_log:
         print(f"  ⚠ {len(error_log)} 只股票拉取失败")
